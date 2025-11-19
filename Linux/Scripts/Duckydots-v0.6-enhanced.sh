@@ -108,6 +108,141 @@ check_package() {
 
 # === Helper Functions ===
 
+
+# Install core Hyprland dependencies
+install_core_hyprland_deps() {
+    log_info "Installing core Hyprland ecosystem dependencies..."
+    
+    local core_deps=(
+        "aquamarine"
+        "hyprlang"
+        "hyprutils"
+        "hyprgraphics"
+        "hyprwayland-scanner"
+        "qt5-wayland"
+        "qt6-wayland"
+        "waybar"
+    )
+    
+    local missing_core=()
+    for dep in "${core_deps[@]}"; do
+        if ! check_package "$dep"; then
+            missing_core+=("$dep")
+        fi
+    done
+    
+    if [[ ${#missing_core[@]} -gt 0 ]]; then
+        log_info "Installing missing core dependencies: ${missing_core[*]}"
+        yay -S --needed --noconfirm "${missing_core[@]}" || {
+            log_warning "Some core dependencies failed to install"
+            return 1
+        }
+        log_success "Core Hyprland dependencies installed"
+    else
+        log_success "All core Hyprland dependencies are already installed"
+    fi
+}
+
+# Install additional utilities
+install_additional_utilities() {
+    log_info "Installing additional Hyprland utilities..."
+    
+    local utils=(
+        "grimblast"
+        "hyprpicker"
+        "wlogout"
+        "rofi-wayland"
+        "brightnessctl"
+        "pamixer"
+    )
+    
+    local missing_utils=()
+    for util in "${utils[@]}"; do
+        if ! check_package "$util"; then
+            missing_utils+=("$util")
+        fi
+    done
+    
+    if [[ ${#missing_utils[@]} -gt 0 ]]; then
+        log_info "Installing: ${missing_utils[*]}"
+        yay -S --needed --noconfirm "${missing_utils[@]}" 2>/dev/null || {
+            log_warning "Some utilities failed to install"
+        }
+    fi
+    
+    log_success "Additional utilities installed"
+}
+
+# Install Hyprland plugins
+install_hyprland_plugins() {
+    log_info "Installing Hyprland plugins..."
+    
+    if ! command -v hyprpm &> /dev/null; then
+        log_warning "hyprpm not available, skipping plugins"
+        return 0
+    fi
+    
+    # Add official plugins repository
+    log_info "Adding Hyprland plugins repository..."
+    if hyprpm add https://github.com/hyprwm/hyprland-plugins 2>/dev/null; then
+        log_success "Plugins repository added"
+        
+        # Enable hyprexpo if available
+        if hyprpm list 2>/dev/null | grep -q "hyprexpo"; then
+            log_info "Enabling hyprexpo plugin..."
+            hyprpm enable hyprexpo 2>/dev/null || log_warning "Failed to enable hyprexpo"
+        fi
+    else
+        log_warning "Failed to add plugins repository"
+    fi
+    
+    log_success "Plugin installation completed"
+}
+
+# Check Hyprland version compatibility
+check_hypr_compatibility() {
+    log_info "Checking Hyprland version compatibility..."
+    
+    if ! command -v hyprctl &> /dev/null; then
+        log_warning "hyprctl not found, skipping compatibility check"
+        return 0
+    fi
+    
+    local hypr_version=$(hyprctl version 2>/dev/null | head -1 | grep -oP '\d+\.\d+\.\d+' || echo "unknown")
+    log_info "Hyprland version: $hypr_version"
+    
+    # Check for critical library versions
+    local libs_found=0
+    local libs_total=3
+    
+    if ldconfig -p | grep -q "libaquamarine.so"; then
+        log_success "libaquamarine found"
+        ((libs_found++))
+    else
+        log_warning "libaquamarine not found"
+    fi
+    
+    if ldconfig -p | grep -q "libhyprlang.so"; then
+        log_success "libhyprlang found"
+        ((libs_found++))
+    else
+        log_warning "libhyprlang not found"
+    fi
+    
+    if ldconfig -p | grep -q "libhyprutils.so"; then
+        log_success "libhyprutils found"
+        ((libs_found++))
+    else
+        log_warning "libhyprutils not found"
+    fi
+    
+    if [[ $libs_found -eq $libs_total ]]; then
+        log_success "All critical libraries found"
+    else
+        log_warning "$libs_found/$libs_total critical libraries found"
+    fi
+}
+
 # Backup existing configurations
 backup_config() {
     local config_dir="$HOME/.config/hypr"
@@ -144,17 +279,33 @@ check_gpu_drivers() {
 # Resolve package conflicts
 resolve_conflicts() {
     log_info "Resolving package conflicts..."
-    local conflicts=("xdg-desktop-portal-hyprland" "hyprlang" "hyprutils" "waybar" "waybar-git")
-    for conflict in "${conflicts[@]}"; do
-        if check_package "$conflict"; then
-            log_warning "Removing conflicting package: $conflict"
-            yay -R --noconfirm "$conflict" 2>/dev/null || true
+    
+    # Handle -git vs stable version conflicts
+    local git_packages=(
+        "hyprgraphics-git:hyprgraphics"
+        "waybar-git:waybar"
+        "xdg-desktop-portal-hyprland-git:xdg-desktop-portal-hyprland"
+    )
+    
+    for pair in "${git_packages[@]}"; do
+        local git_pkg="${pair%%:*}"
+        local stable_pkg="${pair##*:}"
+        
+        if check_package "$git_pkg"; then
+            log_warning "Replacing $git_pkg with $stable_pkg"
+            yay -R --noconfirm "$git_pkg" 2>/dev/null || true
+            yay -S --needed --noconfirm "$stable_pkg" 2>/dev/null || {
+                log_warning "Failed to install $stable_pkg, continuing..."
+            }
         fi
     done
+    
     yay -Sy || {
         log_error "Failed to sync package database"
         exit 1
     }
+    
+    log_success "Package conflicts resolved"
 }
 
 # Create file with heredoc
@@ -172,8 +323,15 @@ EEOF
 
 log_info "Installing packages..."
 
+# Install core Hyprland ecosystem first
+install_core_hyprland_deps || {
+    log_error "Failed to install core dependencies"
+    exit 1
+}
+
+
 # Check hyprpm dependencies
-hyprpm_deps=("cmake" "meson" "cpio" "pkg-config" "git" "gcc" "tomlplusplus")
+hyprpm_deps=("base-devel" "cmake" "meson" "ninja" "cpio" "pkg-config" "git" "gcc" "tomlplusplus" "aquamarine" "hyprlang" "hyprutils" "hyprgraphics" "hyprwayland-scanner")
 missing_hyprpm_deps=()
 for dep in "${hyprpm_deps[@]}"; do
     if ! check_package "$dep"; then
@@ -304,6 +462,16 @@ if [[ ${#missing_packages[@]} -gt 0 ]]; then
 fi
 
 log_success "Package installation completed"
+
+# Install additional utilities
+install_additional_utilities
+
+# Check compatibility
+check_hypr_compatibility
+
+# Install plugins (after hyprpm update)
+install_hyprland_plugins
+
 
 # === Configuration Setup ===
 

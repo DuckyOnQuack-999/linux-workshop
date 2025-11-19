@@ -1,5 +1,93 @@
 #!/bin/bash
 
+# =============================================================================
+# System-Wide Update Manager v4.0 - Enhanced Edition (FIXED) with Topgrade Integration
+# =============================================================================
+# A comprehensive system update script for Arch-based distributions
+# Features: Parallel updates, rollback capability, health monitoring,
+#           notifications, progress persistence, and advanced error handling
+#           Now integrated with Topgrade-inspired updates for firmware, Git, language managers, etc.
+# =============================================================================
+
+set -euo pipefail # Exit on error, undefined vars, pipe failures
+
+# =============================================================================
+# CONFIGURATION AND GLOBAL VARIABLES
+# =============================================================================
+
+# Enhanced configuration with environment support
+CONFIG_DIR="$HOME/.config/update-manager"
+BACKUP_DIR="$CONFIG_DIR/backups/$(date +%Y%m%d_%H%M%S)"
+METRICS_DIR="$CONFIG_DIR/metrics"
+JSON_LOG="$CONFIG_DIR/logs/updates.json"
+PROGRESS_FILE="$CONFIG_DIR/progress.json"
+ROLLBACK_DIR="$CONFIG_DIR/rollback"
+NOTIFICATION_PID_FILE="$CONFIG_DIR/notification.pid"
+
+# Create necessary directories
+mkdir -p "$CONFIG_DIR"/{backups,metrics,logs,rollback}
+
+# Enhanced configuration files to backup
+IMPORTANT_CONFIGS=(
+    "$HOME/.config/hypr"
+    "$HOME/.config/kde"
+    "$HOME/.config/environment.d"
+    "$HOME/.config/plasma-workspace"
+    "$HOME/.config/kwinrc"
+    "$HOME/.config/waybar"
+    "$HOME/.config/wlogout"
+    "$HOME/.config/pipewire"
+    "$HOME/.config/wireplumber"
+    "/etc/X11/xorg.conf.d"
+    "/etc/pacman.conf"
+    "/etc/pacman.d"
+    "/etc/makepkg.conf"
+)
+
+# Topgrade-inspired configurable lists
+GIT_REPOS=(
+    "$HOME/.emacs.d"
+    "$HOME/.doom.d"
+    "$HOME/.tmux"
+    "$HOME/.zsh"
+    "$HOME/.oh-my-zsh"
+    "$HOME/.config/fish"
+    "$HOME/.config/Code/User" # For VS Code settings
+)
+
+# NEW: Neovim plugins (assuming packer.nvim; customize as needed)
+NEOVIM_PLUGINS=(
+    "$HOME/.local/share/nvim/site/pack/packer/start/packer.nvim"
+)
+
+# NEW: Tmux plugins (assuming tpm; customize paths)
+TMUX_PLUGINS=(
+    "$HOME/.tmux/plugins/tpm"
+)
+
+# NEW: Vim plugins (assuming vim-plug; customize)
+VIM_PLUGINS=(
+    "$HOME/.vim/autoload/plug.vim"
+)
+
+CUSTOM_COMMANDS=()
+
+SHELL_UPDATES=(
+    "oh-my-zsh" # Example, add more like fisher, prezto
+)
+
+# System information
+SCRIPT_VERSION="4.0"
+SCRIPT_NAME="System Update Manager"
+START_TIME=""
+START_EPOCH=0
+END_TIME=""
+TOTAL_PACKAGES_UPDATED=0
+FAILED_OPERATIONS=0
+ROLLBACK_ENABLED=false
+PARALLEL_UPDATES=false
+MAX_PARALLEL_JOBS=3
+
 # Colors and styles
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -24,377 +112,940 @@ ICON_CLEANUP="🧹"
 ICON_NETWORK="🌐"
 ICON_CONFIG="⚙️"
 ICON_GPU="🎮"
-ICON_CPU="⚡"
-ICON_RAM="🧠"
 ICON_DISK="💿"
 ICON_DESKTOP="🖥️"
 ICON_KERNEL="🐧"
 ICON_COMPLETE="🎉"
+ICON_FIRMWARE="🔧" # New for firmware
+ICON_GIT="📚"      # New for Git
+ICON_LANG="🛠️"    # New for language managers
 
-# Configuration
-BACKUP_DIR="$HOME/.config/system_backups/$(date +%Y%m%d_%H%M%S)"
-METRICS_DIR="$HOME/.local/share/system_metrics"
-JSON_LOG="$HOME/.local/share/update_logs/updates.json"
-IMPORTANT_CONFIGS=(
-    "$HOME/.config/hypr"
-    "$HOME/.config/kde"
-    "$HOME/.config/environment.d"
-    "$HOME/.config/plasma-workspace"
-    "$HOME/.config/kwinrc"
-    "$HOME/.config/waybar"
-    "$HOME/.config/wlogout"
-    "/etc/X11/xorg.conf.d"
-)
-# Log file and error tracking
-LOG_FILE="$HOME/update_log_$(date +%Y%m%d_%H%M%S).log"
-ERROR_LOG="$HOME/update_errors_$(date +%Y%m%d_%H%M%S).log"
-BACKUP_LOG="$HOME/backup_log_$(date +%Y%m%d_%H%M%S).log"
+# =============================================================================
+# ENHANCED FLAGS AND DEFAULTS
+# =============================================================================
 
-# Enhanced logging function with JSON support
-log_message() {
+# Core update flags
+NONINTERACTIVE=0
+SKIP_AUR=0
+SKIP_FLATPAK=0
+SKIP_SNAP=0
+SKIP_CLEANUP=0
+DRY_RUN=0
+AUR_DEVEL=0
+DNS_FALLBACK=0
+ALLOW_DOWNGRADE=0
+SNAPSHOT_TOOL=""
+PACNEW_MANAGE=0
+NO_COLOR=0
+QUIET=0
+VERBOSE=0
+REPORT_PATH=""
+
+# New Topgrade-inspired skip flags
+SKIP_FIRMWARE=0
+SKIP_GIT=0
+SKIP_CARGO=0
+SKIP_PIP=0
+SKIP_NPM=0
+SKIP_GEM=0
+SKIP_COMPOSER=0
+SKIP_SHELL=0
+SKIP_VSCODE=0
+SKIP_CUSTOM=0
+# NEW: Additional skips
+SKIP_HOMEBREW=0
+SKIP_GO=0
+SKIP_HASKELL=0
+SKIP_LUA=0
+SKIP_DOCKER=0
+SKIP_NEOVIM=0
+# NEW: More Topgrade and Guix skips
+SKIP_NIX=0
+SKIP_OPAM=0
+SKIP_VCPKG=0
+SKIP_YARN=0
+SKIP_RUSTUP=0
+SKIP_TMUX=0
+SKIP_VIM=0
+SKIP_STARSHIP=0
+SKIP_GUIX=0
+
+# Enhanced features
+ENABLE_NOTIFICATIONS=0
+NOTIFY_COMPLETE=0
+NOTIFY_ERRORS=0
+HEALTH_CHECK=0
+MONITOR_RESOURCES=0
+CHECK_DEPENDENCIES=0
+FAST_MIRRORS=0
+CONFIG_FILE=""
+LOG_LEVEL="INFO"
+
+# System state
+SUDO_KEEPALIVE_PID=""
+MIRROR_COUNTRY=""
+
+# Distro detection
+. /etc/os-release 2>/dev/null || true
+case "${ID_LIKE:-$ID}" in
+*manjaro* | *manjaro-linux*) DISTRO_BASE="manjaro" ;;
+*) DISTRO_BASE="arch" ;;
+esac
+
+# =============================================================================
+# ENHANCED ARGUMENT PARSING AND HELP SYSTEM
+# =============================================================================
+
+show_help() {
+    cat <<EOF
+${BOLD}${SCRIPT_NAME} v${SCRIPT_VERSION}${NC}
+
+${BOLD}DESCRIPTION:${NC}
+    A comprehensive system update manager for Arch-based distributions with
+    advanced features including parallel updates, rollback capability,
+    health monitoring, and desktop notifications. Now enhanced with Topgrade-inspired updates for firmware, Git repos, language managers, etc.
+
+${BOLD}USAGE:${NC}
+    $0 [OPTIONS]
+
+${BOLD}OPTIONS:${NC}
+    ${GREEN}Update Control:${NC}
+        -y, --yes, --non-interactive    Run without user interaction
+        --dry-run                       Show what would be updated without making changes
+        --allow-downgrade               Allow package downgrades (pacman -Syud)
+        --parallel                      Enable parallel updates (experimental)
+        --max-jobs N                    Maximum parallel jobs (default: 3)
+
+    ${GREEN}Package Managers:${NC}
+        --no-aur                        Skip AUR updates
+        --no-flatpak                    Skip Flatpak updates
+        --no-snap                       Skip Snap updates
+        --aur-devel                     Include AUR development packages
+
+    ${GREEN}Topgrade-Inspired Updates:${NC}
+        --no-firmware                   Skip firmware updates (fwupdmgr)
+        --no-git                        Skip Git repository pulls
+        --no-cargo                      Skip Cargo (Rust) updates
+        --no-pip                        Skip Pip (Python) updates
+        --no-npm                        Skip Npm (Node) global updates
+        --no-gem                        Skip Gem (Ruby) updates
+        --no-composer                   Skip Composer (PHP) global updates
+        --no-shell                      Skip shell configuration updates (oh-my-zsh, etc.)
+        --no-vscode                     Skip VS Code extension updates
+        --no-custom                     Skip custom commands
+        # NEW: Additional Topgrade handlers
+        --no-homebrew                   Skip Homebrew (Linuxbrew) updates
+        --no-go                         Skip Go module updates
+        --no-haskell                    Skip Haskell (stack/ghcup) updates
+        --no-lua                        Skip Lua (luarocks) updates
+        --no-docker                     Skip Docker/Podman image updates
+        --no-neovim                     Skip Neovim plugin updates
+        # NEW: More Topgrade handlers
+        --no-nix                        Skip Nix/Lix updates
+        --no-opam                       Skip Opam (OCaml) updates
+        --no-vcpkg                      Skip Vcpkg (C++) updates
+        --no-yarn                       Skip Yarn (Node) updates
+        --no-rustup                     Skip Rustup toolchain updates
+        --no-tmux                       Skip Tmux plugin updates
+        --no-vim                        Skip Vim plugin updates
+        --no-starship                   Skip Starship prompt updates
+        --no-guix                       Skip Guix package updates
+
+    ${GREEN}System Operations:${NC}
+        --no-cleanup                    Skip system cleanup
+        --rollback                      Enable rollback capability
+        --snapshots TOOL                Use snapshot tool (timeshift|snapper)
+        --pacnew-manage                 Manage .pacnew/.pacsave files
+
+    ${GREEN}Network & Mirrors:${NC}
+        --dns-fallback                  Use fallback DNS servers
+        --mirror-country COUNTRY       Set mirror country
+        --fast-mirrors                  Use fastest mirrors
+
+    ${GREEN}Output & Logging:${NC}
+        --quiet                         Suppress output
+        --verbose                       Verbose output
+        --no-color                      Disable colored output
+        --report FILE                   Generate report file
+        --log-level LEVEL              Set log level (DEBUG|INFO|WARN|ERROR)
+
+    ${GREEN}Notifications:${NC}
+        --notify                        Enable desktop notifications
+        --notify-complete               Notify on completion
+        --notify-errors                 Notify on errors only
+
+    ${GREEN}Health & Monitoring:${NC}
+        --health-check                  Perform comprehensive health check
+        --monitor-resources             Monitor system resources during update
+        --check-dependencies            Verify package dependencies
+
+    ${GREEN}Miscellaneous:${NC}
+        -h, --help                      Show this help message
+        --version                       Show version information
+        --config FILE                   Use custom config file
+
+${BOLD}EXAMPLES:${NC}
+    $0 --parallel --notify              # Parallel updates with notifications
+    $0 --dry-run --verbose             # Preview updates with verbose output
+    $0 --rollback --health-check       # Update with rollback and health check
+    $0 --allow-downgrade               # Allow package downgrades (for version conflicts)
+    $0 --no-aur --fast-mirrors         # Skip AUR, use fast mirrors
+    $0 --no-firmware --no-git          # Skip firmware and Git updates
+    # NEW: Example with additional handlers
+    $0 --no-homebrew --no-go           # Skip Homebrew and Go updates
+    $0 --no-nix --no-guix              # Skip Nix and Guix updates
+
+${BOLD}CONFIGURATION:${NC}
+    Configuration files are stored in: $CONFIG_DIR
+    Logs are stored in: $CONFIG_DIR/logs
+    Backups are stored in: $CONFIG_DIR/backups
+    Customize GIT_REPOS, NEOVIM_PLUGINS, TMUX_PLUGINS, VIM_PLUGINS, and CUSTOM_COMMANDS in the script for Topgrade-like behavior.
+
+EOF
+}
+
+show_version() {
+    echo "${SCRIPT_NAME} v${SCRIPT_VERSION}"
+    echo "Enhanced system update manager for Arch-based distributions with Topgrade integration"
+}
+
+# Enhanced argument parsing with validation
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        -h | --help)
+            show_help
+            exit 0
+            ;;
+        --version)
+            show_version
+            exit 0
+            ;;
+        -y | --yes | --non-interactive) NONINTERACTIVE=1 ;;
+        --no-aur) SKIP_AUR=1 ;;
+        --no-flatpak) SKIP_FLATPAK=1 ;;
+        --no-snap) SKIP_SNAP=1 ;;
+        --no-cleanup) SKIP_CLEANUP=1 ;;
+        --dry-run) DRY_RUN=1 ;;
+        --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
+        --aur-devel) AUR_DEVEL=1 ;;
+        --dns-fallback) DNS_FALLBACK=1 ;;
+        --parallel) PARALLEL_UPDATES=true ;;
+        --max-jobs)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "Error: Missing value for --max-jobs" >&2
+                exit 1
+            fi
+            if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                echo "Error: --max-jobs value must be a positive integer" >&2
+                exit 1
+            fi
+            MAX_PARALLEL_JOBS="$1"
+            ;;
+        --rollback) ROLLBACK_ENABLED=true ;;
+        --snapshots)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "Error: Missing value for --snapshots" >&2
+                exit 1
+            fi
+            SNAPSHOT_TOOL="$1"
+            ;;
+        --pacnew-manage) PACNEW_MANAGE=1 ;;
+        --no-color) NO_COLOR=1 ;;
+        --mirror-country)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "Error: Missing value for --mirror-country" >&2
+                exit 1
+            fi
+            MIRROR_COUNTRY="$1"
+            ;;
+        --fast-mirrors) FAST_MIRRORS=1 ;;
+        --quiet) QUIET=1 ;;
+        --verbose) VERBOSE=1 ;;
+        --report)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "Error: Missing value for --report" >&2
+                exit 1
+            fi
+            REPORT_PATH="$1"
+            ;;
+        --notify) ENABLE_NOTIFICATIONS=1 ;;
+        --notify-complete) NOTIFY_COMPLETE=1 ;;
+        --notify-errors) NOTIFY_ERRORS=1 ;;
+        --health-check) HEALTH_CHECK=1 ;;
+        --monitor-resources) MONITOR_RESOURCES=1 ;;
+        --check-dependencies) CHECK_DEPENDENCIES=1 ;;
+        --log-level)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "Error: Missing value for --log-level" >&2
+                exit 1
+            fi
+            LOG_LEVEL="$1"
+            ;;
+        --config)
+            shift
+            if [ $# -eq 0 ]; then
+                echo "Error: Missing value for --config" >&2
+                exit 1
+            fi
+            CONFIG_FILE="$1"
+            ;;
+        --no-firmware) SKIP_FIRMWARE=1 ;;
+        --no-git) SKIP_GIT=1 ;;
+        --no-cargo) SKIP_CARGO=1 ;;
+        --no-pip) SKIP_PIP=1 ;;
+        --no-npm) SKIP_NPM=1 ;;
+        --no-gem) SKIP_GEM=1 ;;
+        --no-composer) SKIP_COMPOSER=1 ;;
+        --no-shell) SKIP_SHELL=1 ;;
+        --no-vscode) SKIP_VSCODE=1 ;;
+        --no-custom) SKIP_CUSTOM=1 ;;
+        # NEW: Additional skip options
+        --no-homebrew) SKIP_HOMEBREW=1 ;;
+        --no-go) SKIP_GO=1 ;;
+        --no-haskell) SKIP_HASKELL=1 ;;
+        --no-lua) SKIP_LUA=1 ;;
+        --no-docker) SKIP_DOCKER=1 ;;
+        --no-neovim) SKIP_NEOVIM=1 ;;
+        # NEW: More Topgrade and Guix skip options
+        --no-nix) SKIP_NIX=1 ;;
+        --no-opam) SKIP_OPAM=1 ;;
+        --no-vcpkg) SKIP_VCPKG=1 ;;
+        --no-yarn) SKIP_YARN=1 ;;
+        --no-rustup) SKIP_RUSTUP=1 ;;
+        --no-tmux) SKIP_TMUX=1 ;;
+        --no-vim) SKIP_VIM=1 ;;
+        --no-starship) SKIP_STARSHIP=1 ;;
+        --no-guix) SKIP_GUIX=1 ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
+        esac
+        shift
+    done
+}
+
+parse_args "$@"
+
+if [ "$NO_COLOR" -eq 1 ]; then
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    CYAN=''
+    MAGENTA=''
+    BOLD=''
+    DIM=''
+    ITALIC=''
+    NC=''
+fi
+
+# =============================================================================
+# ENHANCED LOGGING SYSTEM
+# =============================================================================
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_FILE="$CONFIG_DIR/logs/update_${TIMESTAMP}.log"
+ERROR_LOG="$CONFIG_DIR/logs/errors_${TIMESTAMP}.log"
+BACKUP_LOG="$CONFIG_DIR/logs/backup_${TIMESTAMP}.log"
+AUDIT_LOG="$CONFIG_DIR/logs/audit_${TIMESTAMP}.log"
+
+touch "$LOG_FILE" "$ERROR_LOG" "$BACKUP_LOG" "$AUDIT_LOG"
+
+v_echo() {
+    [ "$QUIET" -eq 0 ] && echo -e "$1"
+}
+
+should_log() {
     local level="$1"
-    local message="$2"
+    case "$LOG_LEVEL" in
+    "DEBUG") return 0 ;;
+    "INFO") [ "$level" != "DEBUG" ] && return 0 ;;
+    "WARN") [ "$level" = "WARN" ] || [ "$level" = "ERROR" ] && return 0 ;;
+    "ERROR") [ "$level" = "ERROR" ] && return 0 ;;
+    esac
+    return 1
+}
+
+log_message() {
+    local level="${1:-INFO}"
+    local message="${2:-}"
     local component="${3:-system}"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
-    # Standard log output
+
+    should_log "$level" || return 0
+
     case "$level" in
-        "INFO")  echo -e "${GREEN}[INFO]${NC} $timestamp - $message" | tee -a "$LOG_FILE" ;;
-        "WARN")  echo -e "${YELLOW}[WARN]${NC} $timestamp - $message" | tee -a "$LOG_FILE" ;;
-        "ERROR") echo -e "${RED}[ERROR]${NC} $timestamp - $message" | tee -a "$ERROR_LOG" ;;
-        *)       echo -e "$timestamp - $message" | tee -a "$LOG_FILE" ;;
+    "DEBUG") echo -e "${DIM}[DEBUG]${NC} $timestamp - $message" | tee -a "$LOG_FILE" ;;
+    "INFO") echo -e "${GREEN}[INFO]${NC} $timestamp - $message" | tee -a "$LOG_FILE" ;;
+    "WARN") echo -e "${YELLOW}[WARN]${NC} $timestamp - $message" | tee -a "$LOG_FILE" ;;
+    "ERROR") echo -e "${RED}[ERROR]${NC} $timestamp - $message" | tee -a "$ERROR_LOG" ;;
+    "AUDIT") echo -e "${BLUE}[AUDIT]${NC} $timestamp - $message" | tee -a "$AUDIT_LOG" ;;
+    *) echo -e "$timestamp - $message" | tee -a "$LOG_FILE" ;;
     esac
-    
-    # JSON structured logging
+
     mkdir -p "$(dirname "$JSON_LOG")"
-    local json_entry=$(printf '{"timestamp":"%s","level":"%s","component":"%s","message":"%s"}\n' \
-        "$timestamp" "$level" "$component" "$message")
-    echo "$json_entry" >> "$JSON_LOG"
+    local json_entry=$(printf '{"timestamp":"%s","level":"%s","component":"%s","message":"%s","pid":"%s","user":"%s"}\n' \
+        "$timestamp" "$level" "$component" "$message" "$$" "$USER")
+    echo "$json_entry" >>"$JSON_LOG"
+
+    update_progress "$level" "$message" "$component"
 }
 
-# Component evaluation function
-evaluate_component() {
-    local component="$1"
-    local detailed="${2:-false}"
-    echo -e "\n${BLUE}${ICON_CONFIG} Evaluating component: $component${NC}"
-    
-    # Get component status
-    local status="unknown"
-    local version=""
-    local cpu_usage=""
-    local mem_usage=""
-    
-    # Check if component is running
-    if pgrep -x "$component" >/dev/null; then
-        status="running"
-        pid=$(pgrep -x "$component")
-        cpu_usage=$(ps -p $pid -o %cpu --no-headers)
-        mem_usage=$(ps -p $pid -o %mem --no-headers)
-        version=$(pacman -Q "$component" 2>/dev/null | awk '{print $2}')
-    fi
-    
-    # Create detailed report
-    local report="Status: $status"
-    [ -n "$version" ] && report="$report\nVersion: $version"
-    [ -n "$cpu_usage" ] && report="$report\nCPU Usage: $cpu_usage%"
-    [ -n "$mem_usage" ] && report="$report\nMemory Usage: $mem_usage%"
-    
-    # Log component state
-    log_message "INFO" "Component $component evaluation: $status" "$component"
-    
-    if [ "$detailed" = "true" ]; then
-        echo -e "$report"
-    else
-        echo -e "Component $component is $status"
-    fi
-    
-    return $([ "$status" = "running" ] && echo 0 || echo 1)
+log_info() { log_message "INFO" "$1" "${2:-system}"; }
+log_warn() { log_message "WARN" "$1" "${2:-system}"; }
+log_error() { log_message "ERROR" "$1" "${2:-system}"; }
+log_debug() { log_message "DEBUG" "$1" "${2:-system}"; }
+log_audit() { log_message "AUDIT" "$1" "${2:-system}"; }
+
+# =============================================================================
+# ENHANCED UTILITY FUNCTIONS
+# =============================================================================
+
+update_progress() {
+    local level="${1:-INFO}"
+    local message="${2:-}"
+    local component="${3:-system}"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    local progress_data=$(
+        cat <<EOF
+{
+    "timestamp": "$timestamp",
+    "level": "$level",
+    "component": "$component",
+    "message": "$message",
+    "total_packages": $TOTAL_PACKAGES_UPDATED,
+    "failed_operations": $FAILED_OPERATIONS,
+    "start_time": "$START_TIME",
+    "current_time": "$timestamp"
+}
+EOF
+    )
+    echo "$progress_data" >"$PROGRESS_FILE"
 }
 
-# Dependency analysis function
-analyze_dependencies() {
-    local component="$1"
-    echo -e "\n${BLUE}${ICON_PACKAGE} Analyzing dependencies for: $component${NC}"
-    
-    # Get direct dependencies
-    local deps=$(pacman -Qi "$component" 2>/dev/null | grep "Depends On" | cut -d: -f2-)
-    
-    # Check each dependency
-    echo -e "${CYAN}Dependencies:${NC}"
-    for dep in $deps; do
-        if pacman -Qi "$dep" &>/dev/null; then
-            local version=$(pacman -Q "$dep" | awk '{print $2}')
-            echo -e "${GREEN}${ICON_CHECK} $dep: $version${NC}"
-        else
-            echo -e "${RED}${ICON_ERROR} $dep: Not installed${NC}"
-            log_message "ERROR" "Missing dependency: $dep" "$component"
-        fi
-    done
-}
+send_notification() {
+    local title="${1:-Update}"
+    local message="${2:-}"
+    local urgency="${3:-normal}"
+    local icon="${4:-system-software-update}"
 
-# Component verification function
-verify_component() {
-    local component="$1"
-    echo -e "\n${BLUE}${ICON_CONFIG} Verifying component: $component${NC}"
-    
-    # Create snapshot
-    local snapshot_dir="$BACKUP_DIR/$component"
-    mkdir -p "$snapshot_dir"
-    
-    # Check configuration files
-    if [ -d "/etc/$component" ]; then
-        cp -r "/etc/$component" "$snapshot_dir/"
-        echo -e "${GREEN}${ICON_BACKUP} Configuration snapshot created${NC}"
-    fi
-    
-    # Check for conflicts
-    local conflicts=$(pacman -Qc "$component" 2>/dev/null)
-    if [ -n "$conflicts" ]; then
-        echo -e "${YELLOW}${ICON_WARN} Potential conflicts detected:${NC}"
-        echo "$conflicts"
-        log_message "WARN" "Package conflicts detected for $component" "$component"
-    fi
-    
-    # Verify integrity
-    if pacman -Qk "$component" &>/dev/null; then
-        echo -e "${GREEN}${ICON_CHECK} Package integrity verified${NC}"
-    else
-        echo -e "${RED}${ICON_ERROR} Package integrity check failed${NC}"
-        log_message "ERROR" "Integrity check failed for $component" "$component"
+    [ "$ENABLE_NOTIFICATIONS" -eq 0 ] && return 0
+
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -u "$urgency" -i "$icon" "$title" "$message" &
+    elif command -v kdialog >/dev/null 2>&1; then
+        kdialog --title "$title" --msgbox "$message" &
+    elif command -v zenity >/dev/null 2>&1; then
+        zenity --info --title "$title" --text "$message" &
     fi
 }
 
-# Component error handler
-handle_component_error() {
-    local component="$1"
-    local error_type="$2"
-    local error_msg="$3"
-    
-    echo -e "\n${RED}${ICON_ERROR} Error in component $component: $error_msg${NC}"
-    log_message "ERROR" "$error_msg" "$component"
-    
-    case "$error_type" in
-        "crash")
-            echo -e "${YELLOW}Attempting to restart $component...${NC}"
-            systemctl --user restart "$component" 2>/dev/null || \
-            systemctl restart "$component" 2>/dev/null
-            ;;
-        "config")
-            echo -e "${YELLOW}Attempting to restore configuration from backup...${NC}"
-            if [ -d "$BACKUP_DIR/$component" ]; then
-                sudo cp -r "$BACKUP_DIR/$component"/* "/etc/$component/"
-            fi
-            ;;
-        "dependency")
-            echo -e "${YELLOW}Attempting to reinstall dependencies...${NC}"
-            analyze_dependencies "$component"
-            sudo pacman -S --needed "$component"
-            ;;
-        *)
-            echo -e "${YELLOW}Unknown error type. Manual intervention required.${NC}"
-            ;;
-    esac
+handle_error_with_rollback() {
+    local error_msg="${1:-Unknown error}"
+    local error_code="${2:-1}"
+    local component="${3:-system}"
+
+    log_error "$error_msg (Code: $error_code)" "$component"
+    ((FAILED_OPERATIONS++))
+
+    [ "$NOTIFY_ERRORS" -eq 1 ] && send_notification "Update Error" "$error_msg" "critical" "error"
+
+    if [ "$ROLLBACK_ENABLED" = true ] && [ -d "$ROLLBACK_DIR" ]; then
+        log_info "Attempting rollback for component: $component" "$component"
+        rollback_component "$component" || log_error "Rollback failed for $component" "$component"
+    fi
+
+    update_progress "ERROR" "$error_msg" "$component"
 }
 
-# Performance monitoring function
-monitor_component() {
-    local component="$1"
-    local pid=$(pgrep -x "$component")
-    mkdir -p "$METRICS_DIR"
-    
-    while [ -e /proc/$pid ]; do
-        local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-        local cpu=$(ps -p $pid -o %cpu --no-headers)
-        local mem=$(ps -p $pid -o %mem --no-headers)
-        local threads=$(ps -p $pid -o nlwp --no-headers)
-        
-        # Store metrics
-        echo "$timestamp,$cpu,$mem,$threads" >> "$METRICS_DIR/${component}_metrics.csv"
-        
-        # Real-time display
-        printf "\r${CYAN}%s${NC} - CPU: %5s%% MEM: %5s%% Threads: %3s" \
-            "$component" "$cpu" "$mem" "$threads"
-        
-        sleep 1
-    done
-    printf "\n"
-}
+rollback_component() {
+    local component="${1:-unknown}"
+    local rollback_file="$ROLLBACK_DIR/${component}_backup.tar.gz"
 
-# Function to check process status
-check_process() {
-    local process_name="$1"
-    local friendly_name="${2:-$1}"
-    if pgrep -x "$process_name" >/dev/null; then
-        echo -e "${GREEN}${ICON_CHECK} $friendly_name is running${NC}"
+    if [ -f "$rollback_file" ]; then
+        log_info "Rolling back $component from $rollback_file" "$component"
+        sudo tar -xzf "$rollback_file" -C / 2>/dev/null || return 1
+        log_info "Successfully rolled back $component" "$component"
         return 0
     else
-        echo -e "${YELLOW}${ICON_WARN} $friendly_name is not running${NC}"
-        log_message "WARN" "$friendly_name is not running"
+        log_warn "No rollback data found for $component" "$component"
         return 1
     fi
 }
 
-# Function to check systemd status
-check_systemd_errors() {
-    echo -e "\n${BLUE}${ICON_CONFIG} Checking systemd status...${NC}"
-    local systemd_errors=$(journalctl -p 3..0 -b | grep -i "failed\|error" | tail -n 5)
-    local failed_units=$(systemctl --failed --no-legend)
-    local user_failed_units=$(systemctl --user --failed --no-legend)
-    
-    if [ -n "$systemd_errors" ] || [ -n "$failed_units" ] || [ -n "$user_failed_units" ]; then
-        echo -e "${YELLOW}${ICON_WARN} System service issues detected:${NC}"
-        [ -n "$systemd_errors" ] && echo -e "\nRecent systemd errors:\n$systemd_errors"
-        [ -n "$failed_units" ] && echo -e "\nFailed system units:\n$failed_units"
-        [ -n "$user_failed_units" ] && echo -e "\nFailed user units:\n$user_failed_units"
+create_rollback_backup() {
+    local component="${1:-unknown}"
+    local rollback_file="$ROLLBACK_DIR/${component}_backup.tar.gz"
+
+    mkdir -p "$ROLLBACK_DIR"
+
+    case "$component" in
+    "pacman")
+        sudo tar -czf "$rollback_file" /var/lib/pacman/ 2>/dev/null || return 1
+        ;;
+    "config")
+        tar -czf "$rollback_file" -C "$HOME" .config/ 2>/dev/null || return 1
+        ;;
+    # NEW: Extend for additional components
+    "homebrew")
+        sudo tar -czf "$rollback_file" /opt/homebrew/ 2>/dev/null || return 1 # Or /home/linuxbrew/.linuxbrew
+        ;;
+    "docker")
+        sudo tar -czf "$rollback_file" /var/lib/docker/ 2>/dev/null || return 1
+        ;;
+    # NEW: More rollback cases
+    "nix")
+        tar -czf "$rollback_file" ~/.nix-profile 2>/dev/null || return 1
+        ;;
+    "guix")
+        sudo tar -czf "$rollback_file" /gnu/store 2>/dev/null || log_warn "Guix store too large for full backup; skipping" && return 1
+        ;;
+    "opam")
+        tar -czf "$rollback_file" ~/.opam 2>/dev/null || return 1
+        ;;
+    "vcpkg")
+        tar -czf "$rollback_file" ~/.vcpkg 2>/dev/null || return 1
+        ;;
+    "tmux")
+        tar -czf "$rollback_file" ~/.tmux 2>/dev/null || return 1
+        ;;
+    "vim")
+        tar -czf "$rollback_file" ~/.vim 2>/dev/null || return 1
+        ;;
+    *)
+        log_warn "Unknown component for rollback: $component" "$component"
         return 1
-    fi
-    echo -e "${GREEN}${ICON_CHECK} No systemd errors detected${NC}"
+        ;;
+    esac
+
+    log_info "Created rollback backup for $component" "$component"
     return 0
 }
 
-# Function to check system performance
-check_system_stats() {
-    echo -e "\n${BLUE}${ICON_SYSTEM} Checking system statistics...${NC}"
-    
-    # CPU load
-    local cpu_load=$(uptime | awk -F'load average:' '{ print $2 }' | cut -d, -f1)
-    echo -e "CPU Load: $cpu_load"
-    
-    # Memory usage
-    echo -e "\nMemory Usage:"
-    free -h | grep -v + | sed 's/^/  /'
-    
-    # Disk usage
-    echo -e "\nDisk Usage:"
-    df -h / /home 2>/dev/null | sed 's/^/  /'
-    
-    # Network stats
-    echo -e "\nNetwork Interfaces:"
-    ip -br addr | grep -v '^lo' | sed 's/^/  /'
-}
-
-# Function to check security status
-check_security_status() {
-    echo -e "\n${BLUE}${ICON_CONFIG} Checking security status...${NC}"
-    
-    # Check SSH
-    if [ -f "/etc/ssh/sshd_config" ]; then
-        echo -e "SSH Configuration:"
-        grep -E "^Port|^PermitRootLogin|^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null | sed 's/^/  /'
+cleanup_on_exit() {
+    sudo rm -f /var/lib/pacman/db.lck 2>/dev/null || true
+    if [ "$DNS_FALLBACK" = "1" ]; then
+        if command -v resolvconf >/dev/null 2>&1; then
+            resolvconf -d tmp-dns 2>/dev/null || true
+        elif systemctl is-active systemd-resolved >/dev/null 2>&1; then
+            sudo systemctl restart systemd-resolved 2>/dev/null || true
+        fi
     fi
-    
-    # Check running services
-    echo -e "\nPotentially sensitive services:"
-    systemctl list-units --type=service --state=running | grep -E "ftp|telnet|vnc|rdp" | sed 's/^/  /'
-    
-    # Check last logins
-    echo -e "\nRecent logins:"
-    last -n 5 | sed 's/^/  /'
+    rm -f /tmp/pacman_stderr.log 2>/dev/null || true
+    [ -n "$SUDO_KEEPALIVE_PID" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+
+    if [ "$NOTIFY_COMPLETE" -eq 1 ]; then
+        send_notification "Update Complete" "System update finished with $TOTAL_PACKAGES_UPDATED packages updated" "normal" "system-software-update"
+    fi
+}
+trap cleanup_on_exit EXIT INT TERM
+
+start_sudo_keepalive() {
+    if sudo -v; then
+        (while true; do
+            sudo -n true 2>/dev/null || exit
+            sleep 60
+        done) &
+        SUDO_KEEPALIVE_PID=$!
+    fi
 }
 
-# Function to handle errors
-handle_error() {
-    local error_msg="$1"
-    local error_code="$2"
-    log_message "ERROR" "$error_msg (Code: $error_code)"
-    echo -e "${RED}${ICON_ERROR} Error: $error_msg${NC}"
+retry() {
+    local cmd="$1"
+    local tries="${2:-3}"
+    local backoff="${3:-2}"
+    local i=1
+    while [ $i -le $tries ]; do
+        eval "$cmd" && return 0
+        sleep $((backoff * i))
+        i=$((i + 1))
+    done
+    return 1
+}
+
+check_command() {
+    local cmd="${1:-}"
+    [ -z "$cmd" ] && return 1
+    if ! command -v "$cmd" &>/dev/null; then
+        log_message "WARN" "Command not found: $cmd"
+        return 1
+    fi
+    return 0
+}
+
+show_error_context() {
+    local error_log="${1:-}"
+    local context_lines="${2:-5}"
+
+    if [ -n "$error_log" ] && [ -f "$error_log" ] && [ -s "$error_log" ]; then
+        echo -e "${YELLOW}Error details:${NC}"
+        tail -n "$context_lines" "$error_log" | sed 's/^/  /'
+    fi
+}
+
+attempt_dependency_fix() {
+    echo -e "\n${CYAN}${ICON_CONFIG} Attempting automatic dependency fixes...${NC}"
+    log_info "Running automatic dependency troubleshooting" "pacman"
+
+    local fix_applied=false
+
+    # Step 1: Refresh package databases
+    echo -e "${BLUE}  1/4 Refreshing package databases...${NC}"
+    if sudo pacman -Sy --noconfirm 2>/dev/null; then
+        log_info "Package database refreshed successfully" "pacman"
+        fix_applied=true
+    else
+        log_warn "Database refresh failed" "pacman"
+    fi
+
+    # Step 2: Check for and remove orphaned dependencies
+    echo -e "${BLUE}  2/4 Checking for orphaned dependencies...${NC}"
+    local orphans=""
+    if orphans=$(pacman -Qtdq 2>/dev/null) && [ -n "$orphans" ]; then
+        echo -e "${YELLOW}    Found orphaned packages, removing...${NC}"
+        if sudo pacman -Rns $orphans --noconfirm 2>/dev/null; then
+            log_info "Orphaned dependencies removed" "pacman"
+            fix_applied=true
+        else
+            log_warn "Failed to remove some orphaned dependencies" "pacman"
+        fi
+    else
+        echo -e "${GREEN}    No orphaned dependencies found${NC}"
+    fi
+
+    # Step 3: Clear package cache and re-sync
+    echo -e "${BLUE}  3/4 Clearing package cache...${NC}"
+    sudo rm -f /var/cache/pacman/pkg/*.part 2>/dev/null
+    sudo pacman -Syy --noconfirm 2>/dev/null
+
+    # Step 4: Check for packages requiring updates
+    echo -e "${BLUE}  4/4 Checking for AUR package conflicts...${NC}"
+    if command -v pacman >/dev/null 2>&1; then
+        local foreign_pkgs=$(pacman -Qm 2>/dev/null | wc -l)
+        if [ "$foreign_pkgs" -gt 0 ]; then
+            echo -e "${YELLOW}    Found $foreign_pkgs AUR/foreign packages${NC}"
+            echo -e "${DIM}    Tip: AUR packages may cause dependency conflicts${NC}"
+        fi
+    fi
+
+    if [ "$fix_applied" = true ]; then
+        echo -e "${GREEN}${ICON_CHECK} Automatic fixes applied, retrying update...${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}${ICON_WARN} Could not apply automatic fixes${NC}"
+        return 1
+    fi
+}
+
+attempt_broken_dependency_fix() {
+    echo -e "\n${CYAN}${ICON_CONFIG} Attempting to fix broken AUR dependencies...${NC}"
+    log_info "Running broken dependency troubleshooting" "pacman"
+
+    # Extract the problematic AUR package(s) from the error log
+    local broken_pkgs=$(grep -i "breaks dependency.*required by" /tmp/pacman_stderr.log | sed -n "s/.*required by \(.*\)/\1/p" | sort -u)
+
+    if [ -z "$broken_pkgs" ]; then
+        echo -e "${YELLOW}Could not identify problematic packages${NC}"
+        return 1
+    fi
+
+    echo -e "${YELLOW}Found problematic AUR package(s):${NC}"
+    echo "$broken_pkgs" | while read pkg; do
+        echo -e "  • ${CYAN}$pkg${NC}"
+    done
+    echo ""
+
+    echo -e "${BLUE}Attempting to remove problematic packages temporarily...${NC}"
+    local removed_pkgs=""
+    local failed=false
+
+    while IFS= read -r pkg; do
+        if [ -n "$pkg" ]; then
+            echo -e "  Removing ${CYAN}$pkg${NC}..."
+            if sudo pacman -R "$pkg" --noconfirm 2>/dev/null; then
+                log_info "Temporarily removed $pkg" "pacman"
+                removed_pkgs="$removed_pkgs $pkg"
+            else
+                log_warn "Failed to remove $pkg" "pacman"
+                failed=true
+            fi
+        fi
+    done <<<"$broken_pkgs"
+
+    if [ "$failed" = true ]; then
+        echo -e "${YELLOW}${ICON_WARN} Could not remove all problematic packages${NC}"
+        return 1
+    fi
+
+    if [ -n "$removed_pkgs" ]; then
+        echo -e "${GREEN}${ICON_CHECK} Removed problematic packages, retrying update...${NC}"
+        echo -e "${DIM}Note: You can reinstall these after the update with:${NC}"
+        for pkg in $removed_pkgs; do
+            echo -e "  ${CYAN}yay -S $pkg${NC}"
+        done
+        echo ""
+
+        # Save the list for later
+        echo "$removed_pkgs" >/tmp/update-script-removed-pkgs.txt
+
+        return 0
+    else
+        return 1
+    fi
+}
+
+attempt_git_package_conflict_fix() {
+    echo -e "\n${CYAN}${ICON_CONFIG} Attempting to fix Git package conflicts...${NC}"
+    log_info "Running Git package conflict resolution" "pacman"
+
+    # Extract conflicting regular packages from error log
+    # Pattern: "removing 'package-version' from target list because it conflicts with 'package-git-version'"
+    local conflicting_pkgs=$(grep -i "removing '.*' from target list because it conflicts with '.*-git" /tmp/pacman_stderr.log | \
+        sed -n "s/.*removing '\([^']*\)' from target list.*/\1/p" | sort -u)
+
+    if [ -z "$conflicting_pkgs" ]; then
+        echo -e "${YELLOW}Could not identify conflicting packages${NC}"
+        return 1
+    fi
+
+    # Extract base package names (remove version info)
+    local base_pkgs=""
+    while IFS= read -r pkg; do
+        if [ -n "$pkg" ]; then
+            # Extract base name (everything before the last dash followed by version pattern)
+            local base_name=$(echo "$pkg" | sed -E 's/-[0-9].*$//')
+            base_pkgs="$base_pkgs $base_name"
+        fi
+    done <<<"$conflicting_pkgs"
+
+    # Check which -git versions are actually installed
+    local git_pkgs_installed=""
+    local regular_pkgs_to_remove=""
     
-    case "$error_code" in
-        "PACMAN_ERROR")
-            echo -e "${YELLOW}Attempting to fix pacman database...${NC}"
-            sudo rm -f /var/lib/pacman/db.lck
-            sudo pacman -Syy
+    for base_pkg in $base_pkgs; do
+        base_pkg=$(echo "$base_pkg" | xargs) # trim whitespace
+        if [ -z "$base_pkg" ]; then
+            continue
+        fi
+        
+        # Check if -git version is installed
+        if pacman -Q "${base_pkg}-git" &>/dev/null; then
+            git_pkgs_installed="$git_pkgs_installed ${base_pkg}-git"
+            # Find the exact regular package name that conflicts
+            local regular_pkg=$(echo "$conflicting_pkgs" | grep "^${base_pkg}-" | head -1)
+            if [ -n "$regular_pkg" ]; then
+                regular_pkgs_to_remove="$regular_pkgs_to_remove $regular_pkg"
+            fi
+        fi
+    done
+
+    if [ -z "$regular_pkgs_to_remove" ]; then
+        echo -e "${YELLOW}No conflicting regular packages found to remove${NC}"
+        return 1
+    fi
+
+    echo -e "${YELLOW}Found Git package conflicts:${NC}"
+    for pkg in $regular_pkgs_to_remove; do
+        pkg=$(echo "$pkg" | xargs)
+        local base_name=$(echo "$pkg" | sed -E 's/-[0-9].*$//')
+        local git_version=$(pacman -Q "${base_name}-git" 2>/dev/null | awk '{print $2}')
+        echo -e "  • ${CYAN}$pkg${NC} conflicts with ${GREEN}${base_name}-git-${git_version}${NC}"
+    done
+    echo ""
+
+    echo -e "${BLUE}Removing conflicting regular packages (keeping -git versions)...${NC}"
+    local removed_pkgs=""
+    local failed=false
+
+    for pkg in $regular_pkgs_to_remove; do
+        pkg=$(echo "$pkg" | xargs)
+        if [ -n "$pkg" ]; then
+            # Extract base name for removal
+            local base_name=$(echo "$pkg" | sed -E 's/-[0-9].*$//')
+            echo -e "  Removing ${CYAN}$base_name${NC}..."
+            if sudo pacman -R "$base_name" --noconfirm 2>/dev/null; then
+                log_info "Removed conflicting regular package: $base_name" "pacman"
+                removed_pkgs="$removed_pkgs $base_name"
+            else
+                log_warn "Failed to remove $base_name" "pacman"
+                failed=true
+            fi
+        fi
+    done
+
+    if [ "$failed" = true ]; then
+        echo -e "${YELLOW}${ICON_WARN} Could not remove all conflicting packages${NC}"
+        return 1
+    fi
+
+    if [ -n "$removed_pkgs" ]; then
+        echo -e "${GREEN}${ICON_CHECK} Removed conflicting regular packages, keeping -git versions${NC}"
+        echo -e "${DIM}Note: -git versions are typically more up-to-date and will be kept${NC}"
+        echo ""
+
+        # Append to removed packages list (merge with existing if any)
+        if [ -f /tmp/update-script-removed-pkgs.txt ]; then
+            echo "$removed_pkgs" >>/tmp/update-script-removed-pkgs.txt
+        else
+            echo "$removed_pkgs" >/tmp/update-script-removed-pkgs.txt
+        fi
+
+        return 0
+    else
+        return 1
+    fi
+}
+
+prompt_manual_intervention() {
+    local issue_type="${1:-problem}"
+    local error_log="${2:-}"
+    local auto_fix="${3:-true}"
+
+    # Skip prompt in non-interactive mode
+    if [ "$NONINTERACTIVE" -eq 1 ]; then
+        log_warn "Non-interactive mode: skipping manual intervention prompt" "system"
+        return 1
+    fi
+
+    echo -e "\n${YELLOW}${ICON_WARN} Manual intervention required${NC}"
+    echo -e "${BOLD}What would you like to do?${NC}"
+    echo -e "  ${GREEN}1)${NC} Try automatic fixes and retry"
+    echo -e "  ${CYAN}2)${NC} Open shell for manual fixing and retry"
+    echo -e "  ${YELLOW}3)${NC} Skip this step and continue"
+    echo -e "  ${RED}4)${NC} Abort the update process"
+    echo ""
+
+    local choice=""
+    while true; do
+        read -p "Enter your choice (1-4): " choice
+        case "$choice" in
+        1)
+            # Attempt automatic fixes based on issue type
+            if [ "$issue_type" = "git package conflict" ] && [ "$auto_fix" = "true" ]; then
+                if attempt_git_package_conflict_fix; then
+                    return 0 # Retry after automatic fix
+                else
+                    echo -e "\n${YELLOW}Automatic fixes unsuccessful.${NC}"
+                    echo -e "Choose option 2 to fix manually, or 3 to skip.\n"
+                    continue
+                fi
+            elif [ "$issue_type" = "dependency issue" ] && [ "$auto_fix" = "true" ]; then
+                if attempt_dependency_fix; then
+                    return 0 # Retry after automatic fix
+                else
+                    echo -e "\n${YELLOW}Automatic fixes unsuccessful.${NC}"
+                    echo -e "Choose option 2 to fix manually, or 3 to skip.\n"
+                    continue
+                fi
+            elif [ "$issue_type" = "broken dependency" ] && [ "$auto_fix" = "true" ]; then
+                if attempt_broken_dependency_fix; then
+                    return 0 # Retry after automatic fix
+                else
+                    echo -e "\n${YELLOW}Automatic fixes unsuccessful.${NC}"
+                    echo -e "Choose option 2 to fix manually, or 3 to skip.\n"
+                    continue
+                fi
+            else
+                echo -e "${YELLOW}No automatic fixes available for $issue_type${NC}"
+                echo -e "Please use option 2 for manual intervention.\n"
+                continue
+            fi
             ;;
-        "NETWORK_ERROR")
-            echo -e "${YELLOW}Checking network configuration...${NC}"
-            systemctl restart NetworkManager
-            sleep 2
+        2)
+            echo -e "\n${CYAN}Opening a shell for manual intervention...${NC}"
+            echo -e "${DIM}Fix the issue, then type 'exit' to return to the script${NC}"
+            echo -e "${DIM}Example: sudo pacman -Syu${NC}\n"
+
+            # Open interactive shell
+            bash -i
+
+            echo -e "\n${CYAN}Returning to update script...${NC}"
+            return 0 # Retry
+            ;;
+        3)
+            log_info "User chose to skip this step" "system"
+            return 1 # Skip
+            ;;
+        4)
+            log_info "User chose to abort" "system"
+            echo -e "\n${RED}Aborting update process...${NC}"
+            exit 1
             ;;
         *)
-            echo -e "${YELLOW}Unknown error occurred${NC}"
+            echo -e "${RED}Invalid choice. Please enter 1, 2, 3, or 4.${NC}"
             ;;
-    esac
-}
-# Enhanced command checker
-check_command() {
-    if ! command -v "$1" &> /dev/null; then
-        log_message "WARN" "Command not found: $1"
-        return 1
-    fi
-    return 0
+        esac
+    done
 }
 
-# Enhanced network connectivity check
 check_network() {
     echo -e "\n${CYAN}${ICON_NETWORK} Checking network connectivity...${NC}"
     local timeout=5
-    if ! ping -c 1 -W $timeout 8.8.8.8 &> /dev/null; then
-        if ! ping -c 1 -W $timeout 1.1.1.1 &> /dev/null; then
-            handle_error "No internet connection detected" "NETWORK_ERROR"
-            return 1
+    if ! ping -c 1 -W $timeout 8.8.8.8 &>/dev/null && ! ping -c 1 -W $timeout 1.1.1.1 &>/dev/null; then
+        handle_error_with_rollback "No internet connection detected" "NETWORK_ERROR" "network"
+        return 1
+    fi
+    if ! getent hosts archlinux.org >/dev/null 2>&1; then
+        log_warn "DNS resolution failed for archlinux.org" "network"
+        if [ "$DNS_FALLBACK" = "1" ]; then
+            echo -e "${YELLOW}Applying temporary DNS fallback (1.1.1.1)...${NC}"
+            if command -v resolvconf >/dev/null 2>&1; then
+                sudo resolvconf -a tmp-dns <<<"nameserver 1.1.1.1" 2>/dev/null || true
+            elif systemctl is-active systemd-resolved >/dev/null 2>&1; then
+                sudo bash -c 'printf "nameserver 1.1.1.1\n" > /run/systemd/resolve/resolv.conf' 2>/dev/null || true
+            fi
         fi
     fi
     echo -e "${GREEN}${ICON_CHECK} Network connection established${NC}"
     return 0
 }
 
-# Function to detect and configure environment
 detect_environment() {
     echo -e "\n${CYAN}${ICON_SYSTEM} Detecting system environment...${NC}"
-    
-    # Session type detection
-    if [ "$XDG_SESSION_TYPE" = "wayland" ]; then
-        WAYLAND=1
+
+    if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
         log_message "INFO" "Wayland session detected"
         echo -e "${GREEN}${ICON_CHECK} Wayland session detected${NC}"
-        
-        # Hyprland detection
+
         if pgrep -x "Hyprland" >/dev/null; then
-            HYPRLAND=1
             log_message "INFO" "Hyprland compositor detected"
             echo -e "${GREEN}${ICON_CHECK} Hyprland compositor detected${NC}"
         fi
     else
-        X11=1
         log_message "INFO" "X11 session detected"
         echo -e "${GREEN}${ICON_CHECK} X11 session detected${NC}"
     fi
 
-    # Desktop environment detection
     if pgrep -x "plasmashell" >/dev/null; then
-        KDE=1
         log_message "INFO" "KDE Plasma detected"
         echo -e "${GREEN}${ICON_CHECK} KDE Plasma detected${NC}"
     fi
 }
 
-# Function to check system resources
-check_system_resources() {
-    echo -e "\n${CYAN}${ICON_SYSTEM} Checking system resources...${NC}"
-    
-    # CPU usage
-    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}')
-    echo -e "${BLUE}${ICON_CPU} CPU Usage: ${cpu_usage}%${NC}"
-    
-    # RAM usage
-    local ram_total=$(free -m | awk '/Mem:/ {print $2}')
-    local ram_used=$(free -m | awk '/Mem:/ {print $3}')
-    local ram_percent=$(awk "BEGIN {printf \"%.1f\", $ram_used/$ram_total*100}")
-    echo -e "${BLUE}${ICON_RAM} RAM Usage: ${ram_percent}%${NC}"
-    
-    # Disk space
-    local disk_usage=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
-    echo -e "${BLUE}${ICON_DISK} Disk Usage: ${disk_usage}%${NC}"
-    
-    if [ "$disk_usage" -gt 90 ]; then
-        log_message "WARN" "Low disk space detected: ${disk_usage}%"
-        echo -e "${YELLOW}${ICON_WARN} Warning: Low disk space!${NC}"
-    fi
-}
-# Modern progress bar function
+# FIXED: Safe progress display with default values
 show_progress() {
-    local current=$1
-    local total=$2
+    local current=${1:-0}
+    local total=${2:-1}
+
+    # Ensure variables are properly set and numeric
+    current=${current//[^0-9]/}
+    total=${total//[^0-9]/}
+    current=${current:-0}
+    total=${total:-1}
+
+    # Prevent division by zero
+    [ "$total" -eq 0 ] && total=1
+    [ "$current" -lt 0 ] && current=0
+
     local width=50
     local percentage=$((current * 100 / total))
     local filled=$((width * current / total))
@@ -405,796 +1056,1643 @@ show_progress() {
     printf "]${NC} %3d%%" $percentage
 }
 
-# System resource monitor
-monitor_resources() {
-    local pid=$1
-    while ps -p $pid > /dev/null; do
-        local cpu=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}')
-        local mem=$(free -m | awk '/Mem:/ {printf "%.1f", $3/$2 * 100}')
-        local disk=$(df -h / | awk 'NR==2 {print $5}')
-        printf "\r${CYAN}${ICON_CPU} CPU: %5s%% ${ICON_RAM} RAM: %5s%% ${ICON_DISK} Disk: %s${NC}" "$cpu" "$mem" "$disk"
-        sleep 1
-    done
-    printf "\r%*s\r" 80 ""
-}
-
-# Backup configuration files
+# FIXED: Backup configs function with proper variable scoping
 backup_configs() {
     echo -e "\n${BLUE}${ICON_BACKUP} Backing up system configurations...${NC}"
     mkdir -p "$BACKUP_DIR"
-    
+
+    local sudo_ok=0
+    for attempt in {1..3}; do
+        if timeout 5 sudo -v 2>/dev/null; then
+            sudo_ok=1
+            log_debug "Sudo cache active (attempt $attempt)"
+            break
+        fi
+        sleep 1
+    done
+    if [ "$sudo_ok" -eq 0 ]; then
+        log_warn "Sudo access failed after retries; skipping all config backups"
+        echo -e "${YELLOW}${ICON_WARN} Skipping backups due to sudo issues${NC}"
+        return 0
+    fi
+
+    # FIX: Calculate total inside the same scope where it's used
     local total=${#IMPORTANT_CONFIGS[@]}
     local current=0
-    
-    for config in "${IMPORTANT_CONFIGS[@]}"; do
-        ((current++))
-        if [ -e "$config" ]; then
-            show_progress $current $total
-            cp -r "$config" "$BACKUP_DIR/" 2>/dev/null
-            log_message "INFO" "Backed up: $config"
-        fi
-    done
+
+    # FIX: Use a function instead of subshell to maintain variable scope
+    backup_configs_internal() {
+        for config in "${IMPORTANT_CONFIGS[@]}"; do
+            ((current++))
+            if [ -e "$config" ]; then
+                show_progress "$current" "$total"
+                local cp_cmd="cp -r \"$config\" \"$BACKUP_DIR/\""
+                local stderr_log="/tmp/backup_cp_stderr_$$.log"
+                if [[ "$config" == /etc/* ]]; then
+                    cp_cmd="sudo $cp_cmd"
+                fi
+                if eval "$cp_cmd 2> >(tee \"$stderr_log\" >&2)"; then
+                    log_message "INFO" "Backed up: $config"
+                    rm -f "$stderr_log"
+                else
+                    local cp_error=$(cat "$stderr_log" 2>/dev/null || echo "Unknown cp error")
+                    log_message "ERROR" "Failed to back up: $config (details: $cp_error)"
+                    rm -f "$stderr_log"
+                    ((FAILED_OPERATIONS++))
+                fi
+            fi
+        done
+    }
+
+    # Call the internal function
+    backup_configs_internal || log_warn "Backup loop encountered issues (continuing)"
+
+    if ! sudo chown -R "$USER:$USER" "$BACKUP_DIR" 2>/dev/null; then
+        log_warn "Ownership restoration for backups failed (non-critical)"
+    fi
     echo -e "\n${GREEN}${ICON_CHECK} Backups completed: $BACKUP_DIR${NC}"
 }
 
-# Check GPU drivers and status
-check_gpu_drivers() {
-    echo -e "\n${CYAN}${ICON_GPU} Checking GPU configuration...${NC}"
-    
-    # NVIDIA
-    if lspci | grep -i nvidia >/dev/null; then
-        echo -e "${BLUE}NVIDIA GPU detected${NC}"
-        if ! pacman -Qs nvidia >/dev/null; then
-            log_message "WARN" "NVIDIA GPU detected but drivers not installed"
-            echo -e "${YELLOW}${ICON_WARN} NVIDIA drivers not installed${NC}"
+recover_pacman_sync() {
+    echo -e "${YELLOW}Attempting automated recovery for pacman sync errors...${NC}"
+    log_warn "Starting pacman sync recovery" "pacman"
+
+    sudo rm -f /var/lib/pacman/db.lck 2>/dev/null
+    sudo pacman -Syy || true
+
+    case "$DISTRO_BASE" in
+    manjaro)
+        if ! pacman -Q manjaro-keyring &>/dev/null; then
+            sudo pacman -S --needed --noconfirm manjaro-keyring || true
+        fi
+        ;;
+    *)
+        if ! pacman -Q archlinux-keyring &>/dev/null; then
+            sudo pacman -S --needed --noconfirm archlinux-keyring || true
+        fi
+        ;;
+    esac
+    sudo pacman-key --init 2>/dev/null || true
+    sudo pacman-key --populate archlinux manjaro 2>/dev/null || true
+    sudo pacman-key --refresh-keys 2>/dev/null || true
+
+    sudo rm -f /var/lib/pacman/sync/*.part 2>/dev/null || true
+
+    if [ "$DISTRO_BASE" = "manjaro" ] && command -v pacman-mirrors >/dev/null 2>&1; then
+        echo -e "${BLUE}${ICON_NETWORK} Refreshing Manjaro mirrors...${NC}"
+        if [ -n "$MIRROR_COUNTRY" ]; then
+            sudo pacman-mirrors --country ${MIRROR_COUNTRY//,/ } 2>/dev/null || true
         else
-            local nvidia_version=$(pacman -Qi nvidia | grep Version | awk '{print $3}')
-            echo -e "${GREEN}${ICON_CHECK} NVIDIA drivers installed (v$nvidia_version)${NC}"
+            sudo pacman-mirrors --fasttrack 5 2>/dev/null || true
+        fi
+    elif command -v reflector >/dev/null 2>&1; then
+        echo -e "${BLUE}${ICON_NETWORK} Refreshing Arch mirrors with reflector...${NC}"
+        if [ -n "$MIRROR_COUNTRY" ]; then
+            sudo reflector --country "$MIRROR_COUNTRY" --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null || true
+        else
+            sudo reflector --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null || true
         fi
     fi
-    
-    # AMD
-    if lspci | grep -i amd >/dev/null; then
-        echo -e "${BLUE}AMD GPU detected${NC}"
-        if ! pacman -Qs mesa >/dev/null; then
-            log_message "WARN" "AMD GPU detected but mesa not installed"
-            echo -e "${YELLOW}${ICON_WARN} Mesa drivers not installed${NC}"
-        else
-            local mesa_version=$(pacman -Qi mesa | grep Version | awk '{print $3}')
-            echo -e "${GREEN}${ICON_CHECK} Mesa drivers installed (v$mesa_version)${NC}"
+
+    sudo pacman -Syy || true
+
+    for db in /var/lib/pacman/sync/*.db; do
+        [ -f "$db" ] || continue
+        if ! bsdtar -tf "$db" >/dev/null 2>&1; then
+            sudo rm -f "$db" 2>/dev/null || true
         fi
-    fi
+    done
 }
 
-# Print fancy header
-echo -e "${BLUE}╔═══════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║       ${BOLD}System-Wide Update Manager v3.0${NC}${BLUE}              ║${NC}"
-echo -e "${BLUE}║       ${DIM}Modern Update Solution for Manjaro${NC}${BLUE}           ║${NC}"
-echo -e "${BLUE}╚═══════════════════════════════════════════════════════╝${NC}"
-
-# System information header
-echo -e "\n${CYAN}${ICON_SYSTEM} System Information:${NC}"
-echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}• Kernel:${NC} $(uname -r)"
-echo -e "${BLUE}• Architecture:${NC} $(uname -m)"
-echo -e "${BLUE}• Hostname:${NC} $(hostname)"
-echo -e "${BLUE}• User:${NC} $USER"
-
-# Start logging
-log_message "Starting system update process"
-
-# Check for root privileges
-if [[ $EUID -eq 0 ]]; then
-    echo -e "${RED}Don't run this script as root/sudo directly${NC}"
-    exit 1
-fi
-
-# Check network connectivity
-echo -e "\n${YELLOW}Checking network connectivity...${NC}"
-check_network
-
-# Backup reminder
-echo -e "\n${YELLOW}⚠️  Reminder: Consider backing up important data before proceeding${NC}"
-read -p "Press Enter to continue or Ctrl+C to cancel..."
-
-# Comprehensive System Health Check
-echo -e "\n${CYAN}${ICON_SYSTEM} Performing comprehensive system health check...${NC}"
-echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-
-# Network interfaces and connections
-echo -e "\n${BLUE}${ICON_NETWORK} Checking network interfaces...${NC}"
-if ip link show | grep -v "lo:" >/dev/null; then
-    echo -e "${GREEN}${ICON_CHECK} Network interfaces detected${NC}"
-    for iface in $(ip -o link show | awk -F': ' '{print $2}' | grep -v "lo"); do
-        if ip addr show $iface | grep -q "inet "; then
-            echo -e "  ${GREEN}• $iface: Connected${NC}"
-        else
-            echo -e "  ${YELLOW}• $iface: Disconnected${NC}"
-            log_message "WARN" "Network interface $iface is disconnected"
-        fi
-    done
-else
-    echo -e "${RED}${ICON_ERROR} No network interfaces found${NC}"
-    log_message "ERROR" "No network interfaces detected"
-fi
-
-# Storage health check (SMART)
-echo -e "\n${BLUE}${ICON_DISK} Checking storage health...${NC}"
-if command -v smartctl >/dev/null; then
-    for drive in $(lsblk -d -n -o NAME | grep -E '^sd|^nvme'); do
-        echo -e "Checking /dev/$drive:"
-        if sudo smartctl -H /dev/$drive | grep -q "PASSED"; then
-            echo -e "  ${GREEN}${ICON_CHECK} SMART status: HEALTHY${NC}"
-        else
-            echo -e "  ${RED}${ICON_ERROR} SMART status: FAILING${NC}"
-            log_message "ERROR" "SMART check failed for /dev/$drive"
-        fi
-    done
-else
-    echo -e "${YELLOW}${ICON_WARN} smartctl not installed - skipping SMART checks${NC}"
-fi
-
-# Temperature monitoring
-echo -e "\n${BLUE}${ICON_CPU} Checking system temperatures...${NC}"
-if command -v sensors >/dev/null; then
-    temp_data=$(sensors)
-    cpu_temp=$(echo "$temp_data" | grep -i "Core 0:" | awk '{print $3}' | tr -d '+°C')
-    if [ -n "$cpu_temp" ]; then
-        if [ "${cpu_temp%.*}" -gt 80 ]; then
-            echo -e "  ${RED}• CPU Temperature: ${cpu_temp}°C (HIGH)${NC}"
-            log_message "WARN" "High CPU temperature detected: ${cpu_temp}°C"
-        else
-            echo -e "  ${GREEN}• CPU Temperature: ${cpu_temp}°C${NC}"
-        fi
+pacman_update_with_recovery() {
+    if [ -f /var/lib/pacman/db.lck ]; then
+        log_warn "Stale pacman lock detected; removing to prevent hang" "pacman"
+        sudo rm -f /var/lib/pacman/db.lck
     fi
-    
-    # GPU temperature check
-    if command -v nvidia-smi >/dev/null; then
-        gpu_temp=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader)
-        if [ -n "$gpu_temp" ]; then
-            if [ "$gpu_temp" -gt 80 ]; then
-                echo -e "  ${RED}• GPU Temperature: ${gpu_temp}°C (HIGH)${NC}"
-                log_message "WARN" "High GPU temperature detected: ${gpu_temp}°C"
+
+    # Choose upgrade command based on downgrade flag
+    local upgrade_flag="Syu"
+    [ "$ALLOW_DOWNGRADE" -eq 1 ] && upgrade_flag="Syud"
+
+    local base_cmd="sudo pacman -${upgrade_flag} --noconfirm"
+    [ "$DRY_RUN" = "1" ] && base_cmd="echo DRY-RUN: pacman -${upgrade_flag}"
+    local timed_cmd="timeout 300 $base_cmd"
+
+    # Retry loop for manual intervention
+    local max_retries=3
+    local retry_count=0
+
+    while [ $retry_count -lt $max_retries ]; do
+        if eval "$timed_cmd" 2> >(tee /tmp/pacman_stderr.log >&2); then
+            return 0
+        fi
+
+        # Check for "breaks dependency" FIRST - these are AUR package issues
+        if grep -qi "breaks dependency" /tmp/pacman_stderr.log; then
+            log_error "AUR package dependency break detected - manual intervention required" "pacman"
+            echo -e "${RED}${ICON_ERROR} Broken Dependency Detected${NC}"
+            echo ""
+            show_error_context "/tmp/pacman_stderr.log" 10
+            echo ""
+
+            # Try to extract the problematic package
+            local broken_pkg=$(grep -i "breaks dependency.*required by" /tmp/pacman_stderr.log | sed -n "s/.*required by \(.*\)/\1/p" | head -1)
+
+            if [ -n "$broken_pkg" ]; then
+                echo -e "${YELLOW}Problematic AUR package: ${CYAN}$broken_pkg${NC}"
+                echo ""
+            fi
+
+            echo -e "${YELLOW}Common resolutions:${NC}"
+            if [ -n "$broken_pkg" ]; then
+                echo -e "  ${GREEN}Recommended:${NC} Remove and reinstall after update"
+                echo -e "    ${CYAN}sudo pacman -R $broken_pkg${NC}"
+                echo -e "    ${CYAN}sudo pacman -Syu${NC}"
+                echo -e "    ${CYAN}yay -S $broken_pkg${NC}  # or paru"
+                echo ""
+            fi
+            echo -e "  • Rebuild AUR package: ${CYAN}yay -S <package> --rebuild${NC}"
+            echo -e "  • Skip update temporarily: ${CYAN}sudo pacman -Syu --ignore <package>${NC}"
+            echo -e "  • List all AUR packages: ${CYAN}pacman -Qm${NC}"
+            echo ""
+
+            # Prompt for manual intervention
+            if prompt_manual_intervention "broken dependency" "/tmp/pacman_stderr.log"; then
+                ((retry_count++))
+                log_info "Retrying pacman update (attempt $((retry_count + 1))/$max_retries)..." "pacman"
+                continue
             else
-                echo -e "  ${GREEN}• GPU Temperature: ${gpu_temp}°C${NC}"
+                log_warn "User chose to skip package update" "pacman"
+                return 1
             fi
         fi
+
+        # Check for Git package conflicts - these can be automatically resolved
+        if grep -qi "removing '.*' from target list because it conflicts with '.*-git" /tmp/pacman_stderr.log; then
+            log_error "Git package conflicts detected" "pacman"
+            echo -e "${RED}${ICON_ERROR} Git Package Conflict Detected${NC}"
+            echo ""
+            show_error_context "/tmp/pacman_stderr.log" 15
+            echo ""
+
+            # Extract and display conflicting packages
+            local conflicting_pkgs=$(grep -i "removing '.*' from target list because it conflicts with '.*-git" /tmp/pacman_stderr.log | \
+                sed -n "s/.*removing '\([^']*\)' from target list because it conflicts with '\([^']*\)'.*/\1 conflicts with \2/p" | sort -u)
+
+            if [ -n "$conflicting_pkgs" ]; then
+                echo -e "${YELLOW}The following regular packages conflict with installed -git versions:${NC}"
+                echo "$conflicting_pkgs" | while read conflict_line; do
+                    local regular_pkg=$(echo "$conflict_line" | sed -n "s/\(.*\) conflicts with .*/\1/p")
+                    local git_pkg=$(echo "$conflict_line" | sed -n "s/.* conflicts with \(.*\)/\1/p")
+                    echo -e "  • ${CYAN}$regular_pkg${NC} conflicts with ${GREEN}$git_pkg${NC}"
+                done
+                echo ""
+                echo -e "${GREEN}Recommendation:${NC} Keep -git versions (they're typically more up-to-date)"
+                echo -e "${DIM}The script will automatically remove the conflicting regular packages.${NC}"
+                echo ""
+            fi
+
+            # Try automatic fix
+            if [ "$NONINTERACTIVE" -eq 1 ]; then
+                # Non-interactive mode: try automatic fix
+                if attempt_git_package_conflict_fix; then
+                    ((retry_count++))
+                    log_info "Retrying pacman update after Git conflict resolution (attempt $((retry_count + 1))/$max_retries)..." "pacman"
+                    continue
+                else
+                    log_error "Automatic Git conflict resolution failed" "pacman"
+                    return 1
+                fi
+            else
+                # Interactive mode: prompt user
+                echo -e "${YELLOW}Common resolutions:${NC}"
+                echo -e "  ${GREEN}Recommended:${NC} Remove conflicting regular packages (keeping -git versions)"
+                echo -e "    ${CYAN}sudo pacman -R <regular-package>${NC}"
+                echo -e "  • Review details: ${CYAN}sudo pacman -Syu${NC}"
+                echo ""
+
+                # Prompt for manual intervention
+                if prompt_manual_intervention "git package conflict" "/tmp/pacman_stderr.log"; then
+                    ((retry_count++))
+                    log_info "Retrying pacman update (attempt $((retry_count + 1))/$max_retries)..." "pacman"
+                    continue
+                else
+                    log_warn "User chose to skip package update" "pacman"
+                    return 1
+                fi
+            fi
+        fi
+
+        # Check for package conflicts - these require manual intervention
+        if grep -qi "conflicting dependencies\|package conflicts\|unresolvable package conflicts" /tmp/pacman_stderr.log; then
+            log_error "Package conflicts detected - manual intervention required" "pacman"
+            echo -e "${RED}${ICON_ERROR} Package Conflict Detected${NC}"
+            echo ""
+            show_error_context "/tmp/pacman_stderr.log" 10
+            echo ""
+            echo -e "${YELLOW}Common resolutions:${NC}"
+            echo -e "  • Remove conflicting package: ${CYAN}sudo pacman -R <package>${NC}"
+            echo -e "  • Review details: ${CYAN}sudo pacman -Syu${NC}"
+            echo ""
+
+            # Prompt for manual intervention
+            if prompt_manual_intervention "package conflict" "/tmp/pacman_stderr.log"; then
+                ((retry_count++))
+                log_info "Retrying pacman update (attempt $((retry_count + 1))/$max_retries)..." "pacman"
+                continue
+            else
+                log_warn "User chose to skip package update" "pacman"
+                return 1
+            fi
+        fi
+
+        # Check for generic dependency issues
+        if grep -qi "could not satisfy dependencies\|failed to prepare transaction" /tmp/pacman_stderr.log; then
+            log_error "Dependency issues detected - manual intervention required" "pacman"
+            echo -e "${RED}${ICON_ERROR} Dependency Problem Detected${NC}"
+            echo ""
+            show_error_context "/tmp/pacman_stderr.log" 10
+            echo ""
+            echo -e "${YELLOW}Common resolutions:${NC}"
+            echo -e "  • Update package database: ${CYAN}sudo pacman -Sy${NC}"
+            echo -e "  • Check for broken packages: ${CYAN}sudo pacman -Qk${NC}"
+            echo -e "  • Skip problematic package: ${CYAN}sudo pacman -Syu --ignore <package>${NC}"
+            echo -e "  • Review AUR packages: ${CYAN}pacman -Qm${NC}"
+            echo ""
+
+            # Prompt for manual intervention
+            if prompt_manual_intervention "dependency issue" "/tmp/pacman_stderr.log"; then
+                ((retry_count++))
+                log_info "Retrying pacman update (attempt $((retry_count + 1))/$max_retries)..." "pacman"
+                continue
+            else
+                log_warn "User chose to skip package update" "pacman"
+                return 1
+            fi
+        fi
+
+        # If not a conflict, break out of retry loop
+        break
+    done
+
+    # Handle other error types (outside retry loop)
+    if [ $retry_count -ge $max_retries ]; then
+        log_error "Maximum retry attempts reached for package conflicts" "pacman"
+        return 1
     fi
-else
-    echo -e "${YELLOW}${ICON_WARN} sensors not installed - skipping temperature checks${NC}"
-fi
 
-# Systemd user services status
-echo -e "\n${BLUE}${ICON_CONFIG} Checking systemd user services...${NC}"
-failed_services=$(systemctl --user list-units --state=failed --no-legend)
-if [ -n "$failed_services" ]; then
-    echo -e "${RED}${ICON_ERROR} Failed user services detected:${NC}"
-    echo "$failed_services" | awk '{print "  • " $1 " - " $2}'
-    log_message "ERROR" "Failed user services detected"
-else
-    echo -e "${GREEN}${ICON_CHECK} All user services are running normally${NC}"
-fi
-
-# Audio system check
-echo -e "\n${BLUE}${ICON_CONFIG} Checking audio system...${NC}"
-if pgrep -x "pipewire" >/dev/null; then
-    echo -e "${GREEN}${ICON_CHECK} PipeWire is running${NC}"
-    if pactl info >/dev/null 2>&1; then
-        echo -e "  ${GREEN}• PulseAudio interface is active${NC}"
-    else
-        echo -e "  ${YELLOW}• PulseAudio interface is not responding${NC}"
-        log_message "WARN" "PulseAudio interface not responding"
-    fi
-else
-    echo -e "${RED}${ICON_ERROR} PipeWire is not running${NC}"
-    log_message "ERROR" "Audio system (PipeWire) is not running"
-fi
-
-# Flatpak system check
-if command -v flatpak >/dev/null; then
-    echo -e "\n${BLUE}${ICON_PACKAGE} Checking Flatpak system...${NC}"
-    if flatpak list --runtime | grep -q "org.freedesktop.Platform"; then
-        echo -e "${GREEN}${ICON_CHECK} Flatpak base runtime is installed${NC}"
-    else
-        echo -e "${YELLOW}${ICON_WARN} Flatpak base runtime missing${NC}"
-        log_message "WARN" "Flatpak base runtime is not installed"
-    fi
-fi
-
-# Firewall configuration
-echo -e "\n${BLUE}${ICON_CONFIG} Checking firewall status...${NC}"
-if command -v ufw >/dev/null; then
-    if sudo ufw status | grep -q "Status: active"; then
-        echo -e "${GREEN}${ICON_CHECK} UFW firewall is active${NC}"
-    else
-        echo -e "${YELLOW}${ICON_WARN} UFW firewall is inactive${NC}"
-        log_message "WARN" "Firewall is inactive"
-    fi
-elif command -v firewall-cmd >/dev/null; then
-    if sudo firewall-cmd --state | grep -q "running"; then
-        echo -e "${GREEN}${ICON_CHECK} FirewallD is active${NC}"
-    else
-        echo -e "${YELLOW}${ICON_WARN} FirewallD is inactive${NC}"
-        log_message "WARN" "Firewall is inactive"
-    fi
-fi
-
-# Bluetooth status
-echo -e "\n${BLUE}${ICON_CONFIG} Checking Bluetooth status...${NC}"
-if systemctl is-active bluetooth >/dev/null 2>&1; then
-    echo -e "${GREEN}${ICON_CHECK} Bluetooth service is active${NC}"
-    if bluetoothctl show | grep -q "Powered: yes"; then
-        echo -e "  ${GREEN}• Bluetooth adapter is powered on${NC}"
-    else
-        echo -e "  ${YELLOW}• Bluetooth adapter is powered off${NC}"
-    fi
-else
-    echo -e "${YELLOW}${ICON_WARN} Bluetooth service is not running${NC}"
-fi
-
-# Power management
-echo -e "\n${BLUE}${ICON_CONFIG} Checking power management...${NC}"
-if command -v tlp >/dev/null; then
-    if systemctl is-active tlp >/dev/null 2>&1; then
-        echo -e "${GREEN}${ICON_CHECK} TLP power management is active${NC}"
-    else
-        echo -e "${YELLOW}${ICON_WARN} TLP is installed but not active${NC}"
-    fi
-else
-    echo -e "${YELLOW}${ICON_WARN} TLP is not installed${NC}"
-fi
-
-# System security checks
-echo -e "\n${BLUE}${ICON_CONFIG} Performing security checks...${NC}"
-# Check failed login attempts
-failed_logins=$(journalctl -u systemd-logind -b | grep "Failed password" | wc -l)
-if [ "$failed_logins" -gt 0 ]; then
-    echo -e "${YELLOW}${ICON_WARN} Detected $failed_logins failed login attempts${NC}"
-    log_message "WARN" "Multiple failed login attempts detected"
-else
-    echo -e "${GREEN}${ICON_CHECK} No failed login attempts${NC}"
-fi
-
-# Check active SSH sessions
-ssh_sessions=$(who | grep pts | wc -l)
-if [ "$ssh_sessions" -gt 0 ]; then
-    echo -e "${YELLOW}${ICON_WARN} $ssh_sessions active SSH session(s)${NC}"
-    who | grep pts | awk '{print "  • Connection from: " $5}'
-else
-    echo -e "${GREEN}${ICON_CHECK} No active SSH sessions${NC}"
-fi
-
-echo -e "\n${CYAN}${ICON_SYSTEM} System health check complete${NC}"
-echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-
-# Disk space check
-df -h / | tail -n 1 | awk '{ print $5 }' | cut -d'%' -f1 | {
-    read usage
-    if [ "$usage" -gt 90 ]; then
-        echo -e "${RED}Warning: Low disk space! ($usage% used)${NC}"
-        read -p "Continue anyway? (y/N): " response
-        if [[ ! "$response" =~ ^[Yy]$ ]]; then
-            exit 1
+    if grep -qi "failed to synchronize all databases" /tmp/pacman_stderr.log; then
+        log_error "Pacman sync failed; attempting recovery" "pacman"
+        recover_pacman_sync
+        if eval "$timed_cmd"; then
+            return 0
         fi
     fi
+
+    if grep -qi "PGP signature" /tmp/pacman_stderr.log; then
+        log_warn "PGP signature issue detected; refreshing keyrings and clearing cached signatures" "pacman"
+        case "$DISTRO_BASE" in
+        manjaro)
+            sudo pacman -S --noconfirm --needed manjaro-keyring || true
+            ;;
+        *)
+            sudo pacman -S --noconfirm --needed archlinux-keyring || true
+            ;;
+        esac
+        sudo rm -f /var/cache/pacman/pkg/*.sig 2>/dev/null || true
+        sudo pacman-key --refresh-keys 2>/dev/null || true
+        if eval "$timed_cmd"; then
+            return 0
+        fi
+    fi
+    return 1
 }
 
-    log_message "Starting system package updates"
-    echo -e "\n${CYAN}${ICON_PACKAGE} Updating system packages...${NC}"
+# =============================================================================
+# TOPGRADE-INSPIRED UPDATE FUNCTIONS
+# =============================================================================
 
-    # Start resource monitoring in background
-    monitor_resources $$ &
-    monitor_pid=$!
+update_firmware() {
+    if [ "$SKIP_FIRMWARE" -eq 1 ]; then
+        log_info "Skipping firmware updates" "firmware"
+        return 0
+    fi
 
-    if ! sudo pacman -Syu --noconfirm; then
-        kill $monitor_pid 2>/dev/null
-        handle_error "System package update failed" "PACMAN_ERROR"
+    if ! check_command fwupdmgr; then
+        log_warn "fwupdmgr not found" "firmware"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_FIRMWARE} Updating firmware...${NC}"
+    log_info "Updating firmware with fwupdmgr" "firmware"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "firmware"
+
+    local cmd="sudo fwupdmgr get-updates && sudo fwupdmgr update"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Firmware update failed" "FIRMWARE_ERROR" "firmware"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Firmware updated successfully${NC}"
+    return 0
+}
+
+update_git_repos() {
+    if [ "$SKIP_GIT" -eq 1 ]; then
+        log_info "Skipping Git repository updates" "git"
+        return 0
+    fi
+
+    if ! check_command git; then
+        log_warn "git not found" "git"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_GIT} Updating Git repositories...${NC}"
+    log_info "Pulling Git repositories" "git"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "git"
+
+    local updated_count=0
+    for repo in "${GIT_REPOS[@]}"; do
+        if [ -d "$repo/.git" ]; then
+            local cmd="git -C \"$repo\" pull"
+            [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+            if eval "$cmd"; then
+                ((updated_count++))
+            else
+                log_warn "Failed to pull $repo" "git"
+            fi
+        fi
+    done
+
+    TOTAL_PACKAGES_UPDATED=$((TOTAL_PACKAGES_UPDATED + updated_count))
+    v_echo "${GREEN}${ICON_CHECK} $updated_count Git repositories updated${NC}"
+    return 0
+}
+
+update_cargo() {
+    if [ "$SKIP_CARGO" -eq 1 ]; then
+        log_info "Skipping Cargo updates" "cargo"
+        return 0
+    fi
+
+    if ! check_command cargo; then
+        log_warn "cargo not found" "cargo"
+        return 0
+    fi
+
+    if check_command cargo-install-update; then
+        local cmd="cargo install-update -a"
+    else
+        log_warn "cargo-install-update not installed; skipping detailed Cargo update" "cargo"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Cargo packages...${NC}"
+    log_info "Updating Cargo with $cmd" "cargo"
+
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Cargo update failed" "CARGO_ERROR" "cargo"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Cargo packages updated successfully${NC}"
+    return 0
+}
+
+update_pip() {
+    if [ "$SKIP_PIP" -eq 1 ]; then
+        log_info "Skipping Pip updates" "pip"
+        return 0
+    fi
+
+    if ! check_command pip3; then
+        log_warn "pip3 not found" "pip"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Pip packages...${NC}"
+    log_info "Updating Pip user packages" "pip"
+
+    local cmd="pip3 list --user --outdated --format=freeze | grep -v '^\-e' | cut -d = -f 1 | xargs -n1 pip3 install -U"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! eval "$cmd"; then
+        handle_error_with_rollback "Pip update failed" "PIP_ERROR" "pip"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Pip packages updated successfully${NC}"
+    return 0
+}
+
+update_npm() {
+    if [ "$SKIP_NPM" -eq 1 ]; then
+        log_info "Skipping Npm updates" "npm"
+        return 0
+    fi
+
+    if ! check_command npm; then
+        log_warn "npm not found" "npm"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Npm global packages...${NC}"
+    log_info "Updating Npm globals" "npm"
+
+    local cmd="npm update -g"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Npm update failed" "NPM_ERROR" "npm"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Npm packages updated successfully${NC}"
+    return 0
+}
+
+update_gem() {
+    if [ "$SKIP_GEM" -eq 1 ]; then
+        log_info "Skipping Gem updates" "gem"
+        return 0
+    fi
+
+    if ! check_command gem; then
+        log_warn "gem not found" "gem"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Ruby Gems...${NC}"
+    log_info "Updating Gems" "gem"
+
+    local cmd="gem update"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Gem update failed" "GEM_ERROR" "gem"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Gems updated successfully${NC}"
+    return 0
+}
+
+update_composer() {
+    if [ "$SKIP_COMPOSER" -eq 1 ]; then
+        log_info "Skipping Composer updates" "composer"
+        return 0
+    fi
+
+    if ! check_command composer; then
+        log_warn "composer not found" "composer"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Composer globals...${NC}"
+    log_info "Updating Composer" "composer"
+
+    local cmd="composer global update"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Composer update failed" "COMPOSER_ERROR" "composer"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Composer updated successfully${NC}"
+    return 0
+}
+
+update_shell_configs() {
+    if [ "$SKIP_SHELL" -eq 1 ]; then
+        log_info "Skipping shell configuration updates" "shell"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_CONFIG} Updating shell configurations...${NC}"
+    log_info "Updating shell configs" "shell"
+
+    for shell_update in "${SHELL_UPDATES[@]}"; do
+        case "$shell_update" in
+        "oh-my-zsh")
+            if [ -d "$HOME/.oh-my-zsh" ]; then
+                local cmd="sh -c \"\$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/upgrade.sh)\""
+                [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+                eval "$cmd" || log_warn "Failed to update oh-my-zsh" "shell"
+            fi
+            ;;
+        # Add more shell updates like fisher: fish -c "fisher update"
+        esac
+    done
+
+    v_echo "${GREEN}${ICON_CHECK} Shell configurations updated${NC}"
+    return 0
+}
+
+update_vscode_extensions() {
+    if [ "$SKIP_VSCODE" -eq 1 ]; then
+        log_info "Skipping VS Code extension updates" "vscode"
+        return 0
+    fi
+
+    if ! check_command code; then
+        log_warn "code not found" "vscode"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating VS Code extensions...${NC}"
+    log_info "Updating VS Code extensions" "vscode"
+
+    local cmd="code --list-extensions | xargs -L 1 code --install-extension"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! eval "$cmd"; then
+        handle_error_with_rollback "VS Code extensions update failed" "VSCODE_ERROR" "vscode"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} VS Code extensions updated successfully${NC}"
+    return 0
+}
+
+update_custom_commands() {
+    if [ "$SKIP_CUSTOM" -eq 1 ]; then
+        log_info "Skipping custom commands" "custom"
+        return 0
+    fi
+
+    if [ ${#CUSTOM_COMMANDS[@]} -eq 0 ]; then
+        log_info "No custom commands defined" "custom"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_CONFIG} Running custom commands...${NC}"
+    log_info "Executing custom commands" "custom"
+
+    for cmd in "${CUSTOM_COMMANDS[@]}"; do
+        [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+        if ! eval "$cmd"; then
+            log_warn "Custom command failed: $cmd" "custom"
+        fi
+    done
+
+    v_echo "${GREEN}${ICON_CHECK} Custom commands executed${NC}"
+    return 0
+}
+
+# NEW: Additional Topgrade-inspired functions
+
+update_homebrew() {
+    if [ "$SKIP_HOMEBREW" -eq 1 ]; then
+        log_info "Skipping Homebrew updates" "homebrew"
+        return 0
+    fi
+
+    if ! check_command brew; then
+        log_warn "brew not found (install Linuxbrew if needed)" "homebrew"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Homebrew packages...${NC}"
+    log_info "Updating Homebrew" "homebrew"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "homebrew"
+
+    local cmd="brew update && brew upgrade"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Homebrew update failed" "HOMEBREW_ERROR" "homebrew"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Homebrew packages updated successfully${NC}"
+    return 0
+}
+
+update_go() {
+    if [ "$SKIP_GO" -eq 1 ]; then
+        log_info "Skipping Go updates" "go"
+        return 0
+    fi
+
+    if ! check_command go; then
+        log_warn "go not found" "go"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Go modules...${NC}"
+    log_info "Updating Go modules" "go"
+
+    local cmd="go list -m all | go get -u"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Go update failed" "GO_ERROR" "go"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Go modules updated successfully${NC}"
+    return 0
+}
+
+update_haskell() {
+    if [ "$SKIP_HASKELL" -eq 1 ]; then
+        log_info "Skipping Haskell updates" "haskell"
+        return 0
+    fi
+
+    local haskell_tool=""
+    if check_command stack; then
+        haskell_tool="stack"
+    elif check_command ghcup; then
+        haskell_tool="ghcup"
+    else
+        log_warn "No Haskell tool found (stack or ghcup)" "haskell"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Haskell packages...${NC}"
+    log_info "Updating Haskell with $haskell_tool" "haskell"
+
+    local cmd=""
+    if [ "$haskell_tool" = "stack" ]; then
+        cmd="stack upgrade"
+    else
+        cmd="ghcup upgrade"
+    fi
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Haskell update failed" "HASKELL_ERROR" "haskell"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Haskell packages updated successfully${NC}"
+    return 0
+}
+
+update_lua() {
+    if [ "$SKIP_LUA" -eq 1 ]; then
+        log_info "Skipping Lua updates" "lua"
+        return 0
+    fi
+
+    if ! check_command luarocks; then
+        log_warn "luarocks not found" "lua"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Lua rocks...${NC}"
+    log_info "Updating Lua with luarocks" "lua"
+
+    local cmd="luarocks update"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Lua update failed" "LUA_ERROR" "lua"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Lua rocks updated successfully${NC}"
+    return 0
+}
+
+update_docker() {
+    if [ "$SKIP_DOCKER" -eq 1 ]; then
+        log_info "Skipping Docker/Podman updates" "docker"
+        return 0
+    fi
+
+    local container_tool=""
+    if check_command podman; then
+        container_tool="podman" # Prefer Podman on Arch for rootless
+    elif check_command docker; then
+        container_tool="docker"
+    else
+        log_warn "No container tool found (podman or docker)" "docker"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_PACKAGE} Updating $container_tool images...${NC}"
+    log_info "Updating $container_tool images" "docker"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "docker"
+
+    local cmd="$container_tool images -q | sort -u | xargs -r $container_tool pull"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Container update failed" "DOCKER_ERROR" "docker"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} $container_tool images updated successfully${NC}"
+    return 0
+}
+
+update_neovim() {
+    if [ "$SKIP_NEOVIM" -eq 1 ]; then
+        log_info "Skipping Neovim plugin updates" "neovim"
+        return 0
+    fi
+
+    if ! check_command nvim; then
+        log_warn "nvim not found" "neovim"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Neovim plugins...${NC}"
+    log_info "Updating Neovim plugins (assuming packer.nvim)" "neovim"
+
+    # Assume packer.nvim; adjust for other managers
+    if [ -f "$HOME/.local/share/nvim/site/pack/packer/start/packer.nvim/packer.lua" ]; then
+        local cmd="nvim --headless -c 'autocmd User PackerComplete quitall' -c 'PackerSync'"
+        [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+        eval "$cmd" || log_warn "Neovim PackerSync failed" "neovim"
+    else
+        # Fallback: Git pull for plugin dirs
+        local updated_count=0
+        for plugin in "${NEOVIM_PLUGINS[@]}"; do
+            if [ -d "$plugin/.git" ]; then
+                local git_cmd="git -C \"$plugin\" pull"
+                [ "$DRY_RUN" = "1" ] && git_cmd="echo DRY-RUN: $git_cmd"
+                if eval "$git_cmd"; then
+                    ((updated_count++))
+                fi
+            fi
+        done
+        TOTAL_PACKAGES_UPDATED=$((TOTAL_PACKAGES_UPDATED + updated_count))
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Neovim plugins updated${NC}"
+    return 0
+}
+
+# NEW: More Topgrade-inspired functions and Guix
+
+update_nix() {
+    if [ "$SKIP_NIX" -eq 1 ]; then
+        log_info "Skipping Nix/Lix updates" "nix"
+        return 0
+    fi
+
+    local nix_tool=""
+    if check_command lix; then
+        nix_tool="lix" # Prefer Lix if available
+    elif check_command nix; then
+        nix_tool="nix"
+    else
+        log_warn "No Nix/Lix tool found" "nix"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_PACKAGE} Updating $nix_tool packages...${NC}"
+    log_info "Updating $nix_tool channels and env" "nix"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "nix"
+
+    local cmd="$nix_tool-channel --update && $nix_tool-env -u"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Nix/Lix update failed" "NIX_ERROR" "nix"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} $nix_tool packages updated successfully${NC}"
+    return 0
+}
+
+update_opam() {
+    if [ "$SKIP_OPAM" -eq 1 ]; then
+        log_info "Skipping Opam updates" "opam"
+        return 0
+    fi
+
+    if ! check_command opam; then
+        log_warn "opam not found" "opam"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Opam packages...${NC}"
+    log_info "Updating Opam" "opam"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "opam"
+
+    local cmd="opam update && opam upgrade"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Opam update failed" "OPAM_ERROR" "opam"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Opam packages updated successfully${NC}"
+    return 0
+}
+
+update_vcpkg() {
+    if [ "$SKIP_VCPKG" -eq 1 ]; then
+        log_info "Skipping Vcpkg updates" "vcpkg"
+        return 0
+    fi
+
+    if ! check_command vcpkg; then
+        log_warn "vcpkg not found" "vcpkg"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Vcpkg libraries...${NC}"
+    log_info "Updating Vcpkg" "vcpkg"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "vcpkg"
+
+    local cmd="vcpkg update"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Vcpkg update failed" "VCPKG_ERROR" "vcpkg"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Vcpkg libraries updated successfully${NC}"
+    return 0
+}
+
+update_yarn() {
+    if [ "$SKIP_YARN" -eq 1 ]; then
+        log_info "Skipping Yarn updates" "yarn"
+        return 0
+    fi
+
+    if ! check_command yarn; then
+        log_warn "yarn not found" "yarn"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Yarn global packages...${NC}"
+    log_info "Updating Yarn globals" "yarn"
+
+    local cmd="yarn global upgrade"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Yarn update failed" "YARN_ERROR" "yarn"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Yarn packages updated successfully${NC}"
+    return 0
+}
+
+update_rustup() {
+    if [ "$SKIP_RUSTUP" -eq 1 ]; then
+        log_info "Skipping Rustup updates" "rustup"
+        return 0
+    fi
+
+    if ! check_command rustup; then
+        log_warn "rustup not found" "rustup"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Rust toolchain...${NC}"
+    log_info "Updating Rustup" "rustup"
+
+    local cmd="rustup self update && rustup update"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Rustup update failed" "RUSTUP_ERROR" "rustup"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Rust toolchain updated successfully${NC}"
+    return 0
+}
+
+update_tmux() {
+    if [ "$SKIP_TMUX" -eq 1 ]; then
+        log_info "Skipping Tmux plugin updates" "tmux"
+        return 0
+    fi
+
+    if ! check_command tmux; then
+        log_warn "tmux not found" "tmux"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_CONFIG} Updating Tmux plugins...${NC}"
+    log_info "Updating Tmux plugins (assuming TPM)" "tmux"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "tmux"
+
+    if [ -d "$HOME/.tmux/plugins/tpm" ]; then
+        local cmd="~/.tmux/plugins/tpm/bin/install_plugins"
+        [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+        eval "$cmd" || log_warn "Tmux TPM update failed" "tmux"
+    else
+        # Fallback: Git pull for plugin dirs
+        local updated_count=0
+        for plugin in "${TMUX_PLUGINS[@]}"; do
+            if [ -d "$plugin/.git" ]; then
+                local git_cmd="git -C \"$plugin\" pull"
+                [ "$DRY_RUN" = "1" ] && git_cmd="echo DRY-RUN: $git_cmd"
+                if eval "$git_cmd"; then
+                    ((updated_count++))
+                fi
+            fi
+        done
+        TOTAL_PACKAGES_UPDATED=$((TOTAL_PACKAGES_UPDATED + updated_count))
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Tmux plugins updated${NC}"
+    return 0
+}
+
+update_vim() {
+    if [ "$SKIP_VIM" -eq 1 ]; then
+        log_info "Skipping Vim plugin updates" "vim"
+        return 0
+    fi
+
+    if ! check_command vim; then
+        log_warn "vim not found" "vim"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_LANG} Updating Vim plugins...${NC}"
+    log_info "Updating Vim plugins (assuming vim-plug)" "vim"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "vim"
+
+    if [ -f "$HOME/.vim/autoload/plug.vim" ]; then
+        local cmd="vim +PlugUpgrade +qa!"
+        [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+        eval "$cmd" || log_warn "Vim PlugUpgrade failed" "vim"
+    else
+        # Fallback: Git pull for plugin dirs
+        local updated_count=0
+        for plugin in "${VIM_PLUGINS[@]}"; do
+            if [ -d "$plugin/.git" ]; then
+                local git_cmd="git -C \"$plugin\" pull"
+                [ "$DRY_RUN" = "1" ] && git_cmd="echo DRY-RUN: $git_cmd"
+                if eval "$git_cmd"; then
+                    ((updated_count++))
+                fi
+            fi
+        done
+        TOTAL_PACKAGES_UPDATED=$((TOTAL_PACKAGES_UPDATED + updated_count))
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Vim plugins updated${NC}"
+    return 0
+}
+
+update_starship() {
+    if [ "$SKIP_STARSHIP" -eq 1 ]; then
+        log_info "Skipping Starship updates" "starship"
+        return 0
+    fi
+
+    if ! check_command starship; then
+        log_warn "starship not found" "starship"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_CONFIG} Updating Starship prompt...${NC}"
+    log_info "Updating Starship" "starship"
+
+    local cmd="curl -sS https://starship.rs/install.sh | sh -s -- -y"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Starship update failed" "STARSHIP_ERROR" "starship"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Starship updated successfully${NC}"
+    return 0
+}
+
+update_guix() {
+    if [ "$SKIP_GUIX" -eq 1 ]; then
+        log_info "Skipping Guix updates" "guix"
+        return 0
+    fi
+
+    if ! check_command guix; then
+        log_warn "guix not found" "guix"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_PACKAGE} Updating Guix packages...${NC}"
+    log_info "Updating Guix channels and profile" "guix"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "guix"
+
+    local cmd="guix pull && guix package -u"
+    [ "$DRY_RUN" = "1" ] && cmd="echo DRY-RUN: $cmd"
+
+    if ! retry "$cmd" 2 3; then
+        handle_error_with_rollback "Guix update failed" "GUIX_ERROR" "guix"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Guix packages updated successfully${NC}"
+    return 0
+}
+
+# =============================================================================
+# MAIN EXECUTION FUNCTIONS
+# =============================================================================
+
+update_system_packages() {
+    log_info "Starting system package updates" "pacman"
+    v_echo "\n${CYAN}${ICON_PACKAGE} Updating system packages...${NC}"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "pacman"
+
+    snapshot_pre
+
+    if ! pacman_update_with_recovery; then
+        handle_error_with_rollback "System package update failed" "PACMAN_ERROR" "pacman"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} System packages updated successfully${NC}"
+    snapshot_post
+
+    local updated_count=$(pacman -Qu 2>/dev/null | wc -l || echo 0)
+    updated_count=${updated_count//[^0-9]/}
+    updated_count=${updated_count:-0}
+    TOTAL_PACKAGES_UPDATED=$((TOTAL_PACKAGES_UPDATED + updated_count))
+
+    return 0
+}
+
+update_aur_packages() {
+    if [ "$SKIP_AUR" -eq 1 ]; then
+        log_info "Skipping AUR updates" "aur"
+        return 0
+    fi
+
+    local aur_helper=""
+    local aur_cmd=""
+
+    if check_command yay; then
+        aur_helper="yay"
+        aur_cmd="yay -Sua --noconfirm"
+    elif check_command paru; then
+        aur_helper="paru"
+        aur_cmd="paru -Sua --noconfirm"
+    else
+        log_warn "No AUR helper found (yay/paru)" "aur"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_PACKAGE} Updating AUR packages ($aur_helper)...${NC}"
+    log_info "Updating AUR packages using $aur_helper" "aur"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "aur"
+
+    [ "$AUR_DEVEL" -eq 1 ] && aur_cmd="$aur_cmd --devel"
+    [ "$DRY_RUN" = "1" ] && aur_cmd="echo DRY-RUN: $aur_cmd"
+
+    if ! retry "$aur_cmd" 2 3; then
+        handle_error_with_rollback "AUR update failed ($aur_helper)" "AUR_ERROR" "aur"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} AUR packages updated successfully${NC}"
+
+    local aur_updated=0
+    if [ "$aur_helper" = "yay" ]; then
+        aur_updated=$(yay -Qua 2>/dev/null | wc -l || echo 0)
+    elif [ "$aur_helper" = "paru" ]; then
+        aur_updated=$(paru -Qua 2>/dev/null | wc -l || echo 0)
+    fi
+
+    aur_updated=${aur_updated//[^0-9]/}
+    aur_updated=${aur_updated:-0}
+    TOTAL_PACKAGES_UPDATED=$((TOTAL_PACKAGES_UPDATED + aur_updated))
+
+    return 0
+}
+
+update_flatpak_packages() {
+    if [ "$SKIP_FLATPAK" -eq 1 ]; then
+        log_info "Skipping Flatpak updates" "flatpak"
+        return 0
+    fi
+
+    if ! check_command flatpak; then
+        log_warn "Flatpak not found" "flatpak"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_PACKAGE} Updating Flatpak packages...${NC}"
+    log_info "Updating Flatpak packages" "flatpak"
+
+    [ "$ROLLBACK_ENABLED" = true ] && create_rollback_backup "flatpak"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "DRY-RUN: flatpak update -y"
+    elif ! flatpak update -y; then
+        handle_error_with_rollback "Flatpak update failed" "FLATPAK_ERROR" "flatpak"
+        return 1
+    fi
+
+    [ "$DRY_RUN" = "1" ] && echo "DRY-RUN: flatpak uninstall --unused -y" || flatpak uninstall --unused -y
+
+    v_echo "${GREEN}${ICON_CHECK} Flatpak packages updated successfully${NC}"
+
+    return 0
+}
+
+update_snap_packages() {
+    if [ "$SKIP_SNAP" -eq 1 ]; then
+        log_info "Skipping Snap updates" "snap"
+        return 0
+    fi
+
+    if ! check_command snap; then
+        log_warn "Snap not found" "snap"
+        return 0
+    fi
+
+    # Check if snapd service is running
+    if ! systemctl is-active snapd.socket >/dev/null 2>&1; then
+        log_warn "Snapd service not running - skipping Snap updates" "snap"
+        v_echo "${YELLOW}${ICON_WARN} Snapd service unavailable, skipping Snap updates${NC}"
+        echo -e "${DIM}  Tip: Start snapd with: ${CYAN}sudo systemctl start snapd.socket${NC}"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_PACKAGE} Updating Snap packages...${NC}"
+    log_info "Updating Snap packages" "snap"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "DRY-RUN: snap refresh"
+    elif ! sudo snap refresh; then
+        handle_error_with_rollback "Snap update failed" "SNAP_ERROR" "snap"
+        return 1
+    fi
+
+    v_echo "${GREEN}${ICON_CHECK} Snap packages updated successfully${NC}"
+    return 0
+}
+
+perform_system_cleanup() {
+    if [ "$SKIP_CLEANUP" -eq 1 ]; then
+        log_info "Skipping system cleanup" "cleanup"
+        return 0
+    fi
+
+    v_echo "\n${CYAN}${ICON_CLEANUP} Performing system cleanup...${NC}"
+    log_info "Starting system cleanup" "cleanup"
+
+    echo -e "${BLUE}${ICON_PACKAGE} Cleaning package cache...${NC}"
+    local cache_size_before=$(du -sm /var/cache/pacman/pkg 2>/dev/null | awk '{print $1}' || echo "0")
+    cache_size_before=${cache_size_before//[^0-9]/}
+    cache_size_before=${cache_size_before:-0}
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "DRY-RUN: sudo pacman -Sc --noconfirm"
+    else
+        if sudo pacman -Sc --noconfirm; then
+            local cache_size_after=$(du -sm /var/cache/pacman/pkg 2>/dev/null | awk '{print $1}' || echo "0")
+            cache_size_after=${cache_size_after//[^0-9]/}
+            cache_size_after=${cache_size_after:-0}
+            log_message "Package cache cleaned (Before: ${cache_size_before} MiB, After: ${cache_size_after} MiB)"
+            v_echo "${GREEN}${ICON_CHECK} Package cache cleaned (${cache_size_before} → ${cache_size_after} MiB)${NC}"
+        fi
+    fi
+
+    echo -e "${BLUE}${ICON_PACKAGE} Checking for orphaned packages...${NC}"
+    local orphans=""
+    if orphans=$(pacman -Qtdq 2>/dev/null) && [ -n "$orphans" ]; then
+        local orphan_count=$(echo "$orphans" | wc -l | tr -d ' ')
+        orphan_count=${orphan_count:-0}
+        v_echo "${YELLOW}Found $orphan_count orphaned packages${NC}"
+        if [ "$DRY_RUN" = "1" ]; then
+            echo "DRY-RUN: sudo pacman -Rns $(pacman -Qtdq) --noconfirm"
+        else
+            if sudo pacman -Rns $(pacman -Qtdq) --noconfirm; then
+                log_message "$orphan_count orphaned packages removed"
+                v_echo "${GREEN}${ICON_CHECK} Orphaned packages removed successfully${NC}"
+            fi
+        fi
+    else
+        v_echo "${GREEN}${ICON_CHECK} No orphaned packages found${NC}"
+    fi
+
+    echo -e "${BLUE}${ICON_CLEANUP} Cleaning system journals...${NC}"
+    local journal_size_before=$(du -sm /var/log/journal 2>/dev/null | awk '{print $1}' || echo "0")
+    journal_size_before=${journal_size_before//[^0-9]/}
+    journal_size_before=${journal_size_before:-0}
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "DRY-RUN: sudo journalctl --vacuum-time=7d"
+    elif sudo journalctl --vacuum-time=7d; then
+        local journal_size_after=$(du -sm /var/log/journal 2>/dev/null | awk '{print $1}' || echo "0")
+        journal_size_after=${journal_size_after//[^0-9]/}
+        journal_size_after=${journal_size_after:-0}
+        log_message "Journal logs cleaned (Before: ${journal_size_before} MiB, After: ${journal_size_after} MiB)"
+        v_echo "${GREEN}${ICON_CHECK} Journal cleaned (${journal_size_before} → ${journal_size_after} MiB)${NC}"
+    fi
+
+    # New Topgrade-inspired cleanups
+    if [ "$SKIP_CARGO" -eq 0 ] && check_command cargo; then
+        echo -e "${BLUE}${ICON_LANG} Cleaning Cargo cache...${NC}"
+        cargo cache -a || true
+    fi
+
+    if [ "$SKIP_NPM" -eq 0 ] && check_command npm; then
+        echo -e "${BLUE}${ICON_LANG} Cleaning Npm cache...${NC}"
+        npm cache clean --force || true
+    fi
+
+    # NEW: Additional cleanups
+    if [ "$SKIP_HOMEBREW" -eq 0 ] && check_command brew; then
+        echo -e "${BLUE}${ICON_LANG} Cleaning Homebrew...${NC}"
+        brew cleanup || true
+    fi
+
+    if [ "$SKIP_GO" -eq 0 ] && check_command go; then
+        echo -e "${BLUE}${ICON_LANG} Cleaning Go module cache...${NC}"
+        go clean -modcache || true
+    fi
+
+    if [ "$SKIP_DOCKER" -eq 0 ] && (check_command podman || check_command docker); then
+        local tool=$(check_command podman && echo "podman" || echo "docker")
+        echo -e "${BLUE}${ICON_PACKAGE} Pruning $tool unused resources...${NC}"
+        sudo $tool system prune -f || true
+    fi
+
+    # NEW: More cleanups for additional handlers
+    if [ "$SKIP_NIX" -eq 0 ] && (check_command nix || check_command lix); then
+        local tool=$(check_command lix && echo "lix" || echo "nix")
+        echo -e "${BLUE}${ICON_PACKAGE} Garbage collecting $tool...${NC}"
+        $tool-collect-garbage -d || true
+    fi
+
+    if [ "$SKIP_OPAM" -eq 0 ] && check_command opam; then
+        echo -e "${BLUE}${ICON_LANG} Cleaning Opam...${NC}"
+        opam clean || true
+    fi
+
+    if [ "$SKIP_YARN" -eq 0 ] && check_command yarn; then
+        echo -e "${BLUE}${ICON_LANG} Cleaning Yarn cache...${NC}"
+        yarn cache clean || true
+    fi
+
+    if [ "$SKIP_RUSTUP" -eq 0 ] && check_command rustup; then
+        echo -e "${BLUE}${ICON_LANG} Cleaning Rustup...${NC}"
+        rustup self update --cleanup || true
+    fi
+
+    if [ "$SKIP_GUIX" -eq 0 ] && check_command guix; then
+        echo -e "${BLUE}${ICON_PACKAGE} Garbage collecting Guix...${NC}"
+        guix gc || true
+    fi
+
+    # Add more cleanups as needed
+
+    return 0
+}
+
+snapshot_pre() {
+    case "$SNAPSHOT_TOOL" in
+    timeshift)
+        [ "$DRY_RUN" = "1" ] && echo "DRY-RUN: timeshift --create --comments 'pre-update $(date)'" || sudo timeshift --create --comments "pre-update $(date)" 2>/dev/null || true
+        ;;
+    snapper)
+        [ "$DRY_RUN" = "1" ] && echo "DRY-RUN: snapper create -t pre -d 'pre-update $(date)'" || sudo snapper create -t pre -d "pre-update $(date)" 2>/dev/null || true
+        ;;
+    esac
+}
+
+snapshot_post() {
+    case "$SNAPSHOT_TOOL" in
+    timeshift)
+        [ "$DRY_RUN" = "1" ] && echo "DRY-RUN: timeshift --create --comments 'post-update $(date)'" || sudo timeshift --create --comments "post-update $(date)" 2>/dev/null || true
+        ;;
+    snapper)
+        [ "$DRY_RUN" = "1" ] && echo "DRY-RUN: snapper create -t post -d 'post-update $(date)'" || sudo snapper create -t post -d "post-update $(date)" 2>/dev/null || true
+        ;;
+    esac
+}
+
+# =============================================================================
+# MAIN EXECUTION
+# =============================================================================
+
+main() {
+    # CRITICAL FIX: Initialize ALL numeric variables EARLY
+    START_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+    START_EPOCH=$(date +%s)
+    END_TIME=""
+    TOTAL_PACKAGES_UPDATED=0
+    FAILED_OPERATIONS=0
+
+    log_audit "Starting system update process" "main"
+
+    # Print fancy header
+    echo -e "${BLUE}${BOLD}"
+    cat <<'EOF'
+╔═══════════════════════════════════════════════════════════════════════╗
+║          System Update Manager v4.0 - Enhanced Edition               ║
+║    A comprehensive update manager for Arch-based distributions       ║
+╚═══════════════════════════════════════════════════════════════════════╝
+EOF
+    echo -e "${NC}"
+    # Ask for upgrade method if not specified and in interactive mode
+    if [ "$NONINTERACTIVE" -eq 0 ] && [ "$ALLOW_DOWNGRADE" -eq 0 ]; then
+        echo -e "${CYAN}${BOLD}Select Upgrade Method:${NC}"
+        echo -e "  ${GREEN}1)${NC} Standard upgrade (${CYAN}pacman -Syu${NC}) - Recommended"
+        echo -e "  ${YELLOW}2)${NC} Allow downgrades (${CYAN}pacman -Syud${NC}) - For resolving version conflicts"
+        echo ""
+
+        local upgrade_choice=""
+        while true; do
+            read -p "Enter your choice (1-2, default: 1): " upgrade_choice
+            upgrade_choice=${upgrade_choice:-1}
+
+            case "$upgrade_choice" in
+            1)
+                ALLOW_DOWNGRADE=0
+                echo -e "${GREEN}Using standard upgrade (pacman -Syu)${NC}\n"
+                break
+                ;;
+            2)
+                ALLOW_DOWNGRADE=1
+                echo -e "${YELLOW}Using downgrade mode (pacman -Syud)${NC}\n"
+                break
+                ;;
+            *)
+                echo -e "${RED}Invalid choice. Please enter 1 or 2.${NC}"
+                ;;
+            esac
+        done
+    fi
+
+    # Display configuration
+    echo -e "${CYAN}${BOLD}Configuration:${NC}"
+    echo -e "  Distro: $DISTRO_BASE | Parallel: $PARALLEL_UPDATES | Rollback: $ROLLBACK_ENABLED"
+    echo -e "  Dry Run: $DRY_RUN | Skip AUR: $SKIP_AUR | Skip Flatpak: $SKIP_FLATPAK"
+    if [ "$ALLOW_DOWNGRADE" -eq 1 ]; then
+        echo -e "  ${YELLOW}Upgrade Mode: Allow Downgrades (pacman -Syud)${NC}"
+    else
+        echo -e "  Upgrade Mode: Standard (pacman -Syu)"
+    fi
+    echo -e "  Topgrade Skips: Firmware:$SKIP_FIRMWARE Git:$SKIP_GIT Cargo:$SKIP_CARGO Pip:$SKIP_PIP etc."
+    # NEW: Extend config display
+    echo -e "  Additional Skips: Homebrew:$SKIP_HOMEBREW Go:$SKIP_GO Haskell:$SKIP_HASKELL Lua:$SKIP_LUA Docker:$SKIP_DOCKER Neovim:$SKIP_NEOVIM"
+    # NEW: More skips display
+    echo -e "  Extended Skips: Nix:$SKIP_NIX Opam:$SKIP_OPAM Vcpkg:$SKIP_VCPKG Yarn:$SKIP_YARN Rustup:$SKIP_RUSTUP Tmux:$SKIP_TMUX Vim:$SKIP_VIM Starship:$SKIP_STARSHIP Guix:$SKIP_GUIX"
+    echo ""
+
+    # Start sudo keepalive
+    start_sudo_keepalive
+
+    # Detect environment
+    detect_environment
+
+    # Check network
+    if ! check_network; then
+        log_error "Network check failed" "main"
         exit 1
     fi
 
-    kill $monitor_pid 2>/dev/null
-    echo -e "${GREEN}${ICON_CHECK} System packages updated successfully${NC}"
-# Update AUR packages with progress monitoring
-if check_command yay; then
-    echo -e "\n${CYAN}${ICON_PACKAGE} Updating AUR packages (yay)...${NC}"
-    log_message "Updating AUR packages using yay"
-    monitor_resources $$ &
-    monitor_pid=$!
-    if ! yay -Sua --noconfirm; then
-        kill $monitor_pid 2>/dev/null
-        handle_error "AUR update failed" "AUR_ERROR"
+    # Backup configurations
+    backup_configs
+
+    # Update system packages
+    if ! update_system_packages; then
+        log_warn "System package update encountered issues" "main"
     fi
-    kill $monitor_pid 2>/dev/null
-    echo -e "${GREEN}${ICON_CHECK} AUR packages updated successfully${NC}"
-elif check_command paru; then
-    echo -e "\n${CYAN}${ICON_PACKAGE} Updating AUR packages (paru)...${NC}"
-    log_message "Updating AUR packages using paru"
-    monitor_resources $$ &
-    monitor_pid=$!
-    if ! paru -Sua --noconfirm; then
-        kill $monitor_pid 2>/dev/null
-        handle_error "AUR update failed" "AUR_ERROR"
+
+    # Update AUR packages
+    if ! update_aur_packages; then
+        log_warn "AUR update encountered issues" "main"
     fi
-    kill $monitor_pid 2>/dev/null
-    echo -e "${GREEN}${ICON_CHECK} AUR packages updated successfully${NC}"
-fi
 
-# Update Flatpak packages with progress monitoring
-if check_command flatpak; then
-    echo -e "\n${CYAN}${ICON_PACKAGE} Updating Flatpak packages...${NC}"
-    log_message "Updating Flatpak packages"
-    monitor_resources $$ &
-    monitor_pid=$!
-    if ! flatpak update -y; then
-        kill $monitor_pid 2>/dev/null
-        handle_error "Flatpak update failed" "FLATPAK_ERROR"
-    else
-        flatpak uninstall --unused -y
+    # Update Flatpak packages
+    if ! update_flatpak_packages; then
+        log_warn "Flatpak update encountered issues" "main"
     fi
-    kill $monitor_pid 2>/dev/null
-    echo -e "${GREEN}${ICON_CHECK} Flatpak packages updated successfully${NC}"
-fi
 
-# Update Snap packages
-if check_command snap; then
-    echo -e "\n${GREEN}📦 Updating Snap packages...${NC}"
-    log_message "Updating Snap packages"
-    sudo snap refresh
-fi
-
-# System cleanup with enhanced visualization
-echo -e "\n${CYAN}${ICON_CLEANUP} Performing system cleanup...${NC}"
-log_message "Starting system cleanup"
-
-# Clean package cache with progress
-echo -e "${BLUE}${ICON_PACKAGE} Cleaning package cache...${NC}"
-cache_size_before=$(du -sh /var/cache/pacman/pkg | cut -f1)
-if sudo pacman -Sc --noconfirm; then
-    cache_size_after=$(du -sh /var/cache/pacman/pkg | cut -f1)
-    log_message "Package cache cleaned (Before: $cache_size_before, After: $cache_size_after)"
-    echo -e "${GREEN}${ICON_CHECK} Package cache cleaned ($cache_size_before → $cache_size_after)${NC}"
-fi
-
-# Remove orphaned packages with details
-echo -e "${BLUE}${ICON_PACKAGE} Checking for orphaned packages...${NC}"
-if orphans=$(pacman -Qtdq); then
-    orphan_count=$(echo "$orphans" | wc -l)
-    echo -e "${YELLOW}Found $orphan_count orphaned packages${NC}"
-    if sudo pacman -Rns $(pacman -Qtdq) --noconfirm; then
-        log_message "$orphan_count orphaned packages removed"
-        echo -e "${GREEN}${ICON_CHECK} Orphaned packages removed successfully${NC}"
+    # Update Snap packages
+    if ! update_snap_packages; then
+        log_warn "Snap update encountered issues" "main"
     fi
-else
-    echo -e "${GREEN}${ICON_CHECK} No orphaned packages found${NC}"
-fi
 
-# Clean journal logs older than 7 days
-# Journal cleanup with size reporting
-echo -e "${BLUE}${ICON_CLEANUP} Cleaning system journals...${NC}"
-journal_size_before=$(du -sh /var/log/journal 2>/dev/null | cut -f1)
-if sudo journalctl --vacuum-time=7d; then
-    journal_size_after=$(du -sh /var/log/journal 2>/dev/null | cut -f1)
-    log_message "Journal logs cleaned (Before: $journal_size_before, After: $journal_size_after)"
-    echo -e "${GREEN}${ICON_CHECK} Journal cleaned ($journal_size_before → $journal_size_after)${NC}"
-fi
-
-# Comprehensive system verification
-echo -e "\n${CYAN}${ICON_SYSTEM} Performing final system verification...${NC}"
-
-# Check system services
-echo -e "${BLUE}${ICON_CONFIG} Verifying system services...${NC}"
-failed_services=$(systemctl --failed)
-if echo "$failed_services" | grep -q "0 loaded units listed"; then
-    echo -e "${GREEN}${ICON_CHECK} All system services are running normally${NC}"
-else
-    echo -e "${RED}${ICON_ERROR} Failed services detected:${NC}"
-    echo "$failed_services" | grep "failed" | sed 's/^/  /'
-    log_message "ERROR" "Failed system services detected"
-fi
-
-# Check Window Manager and Desktop Status
-echo -e "${CYAN}${ICON_DESKTOP} Verifying Window Manager status...${NC}"
-
-# Function to check process status
-check_system_process() {
-    local process_name="$1"
-    local friendly_name="${2:-$1}"
-    local optional="${3:-false}"
-    
-    if pgrep -x "$process_name" >/dev/null; then
-        echo -e "${GREEN}${ICON_CHECK} $friendly_name is running${NC}"
-        return 0
-    else
-        if [ "$optional" = "true" ]; then
-            echo -e "${YELLOW}${ICON_WARN} Optional: $friendly_name is not running${NC}"
-            log_message "WARN" "Optional process $friendly_name is not running"
-        else
-            echo -e "${RED}${ICON_ERROR} Required: $friendly_name is not running${NC}"
-            log_message "ERROR" "Required process $friendly_name is not running"
-        fi
-        return 1
+    # Topgrade-inspired updates
+    if ! update_firmware; then
+        log_warn "Firmware update encountered issues" "main"
     fi
-}
 
-# Optimized function to check desktop environment status
-check_desktop_environment_status() {
-    local session_type="$XDG_SESSION_TYPE"
-    local de_type=""
-    
-    # Detect session and DE type
-    if [ "$session_type" = "wayland" ]; then
-        de_type="wayland"
-        [ -n "$(pgrep -x Hyprland)" ] && de_type="hyprland"
-        [ -n "$(pgrep -x sway)" ] && de_type="sway"
-    else
-        [ -n "$(pgrep -x plasmashell)" ] && de_type="kde"
-        [ -n "$(pgrep -x gnome-shell)" ] && de_type="gnome"
-        [ -n "$(pgrep -x xfce4-session)" ] && de_type="xfce"
+    if ! update_git_repos; then
+        log_warn "Git repos update encountered issues" "main"
     fi
-    
-    echo -e "\n${BLUE}${ICON_DESKTOP} Checking desktop environment ($de_type)...${NC}"
-    
-    case "$de_type" in
-        "hyprland")
-            check_system_process "Hyprland" "Hyprland Compositor"
-            check_system_process "waybar" "Waybar"
-            check_system_process "dunst" "Dunst" "true"
-            check_system_process "polkit-gnome-au" "Polkit" "true"
-            ;;
-        "kde")
-            check_system_process "plasmashell" "Plasma Shell"
-            check_system_process "kwin_x11" "KWin" "true"
-            check_system_process "kwin_wayland" "KWin Wayland" "true"
-            ;;
-        *)
-            echo -e "${YELLOW}${ICON_WARN} Unknown or unsupported desktop environment${NC}"
-            ;;
-    esac
-}
-# Check Hyprland and critical components
 
-# Function to check package installation
-check_package() {
-    local pkg_name="$1"
-    if pacman -Qi "$pkg_name" &>/dev/null; then
-        echo -e "${GREEN}${ICON_CHECK} $pkg_name is installed${NC}"
-        return 0
-    else
-        echo -e "${YELLOW}${ICON_WARN} $pkg_name is not installed${NC}"
-        log_message "WARN" "Missing package: $pkg_name"
-        return 1
+    if ! update_cargo; then
+        log_warn "Cargo update encountered issues" "main"
     fi
-}
 
-# Check compositor-related errors in journal
-echo -e "\n${BLUE}${ICON_CONFIG} Checking compositor logs...${NC}"
-compositor_errors=$(journalctl -b | grep -i "compositor\|wayland\|hyprland" | grep -i "error\|fail" | tail -n 5)
-if [ -n "$compositor_errors" ]; then
-    echo -e "${YELLOW}${ICON_WARN} Recent compositor-related errors found:${NC}"
-    echo "$compositor_errors" | sed 's/^/  /'
-    log_message "WARN" "Compositor errors detected in journal"
-else
-    echo -e "${GREEN}${ICON_CHECK} No recent compositor errors found${NC}"
-fi
-# Hyprland check
-check_hyprland() {
-    if [ "$HYPRLAND" = "1" ]; then
-        echo -e "${BLUE}${ICON_CONFIG} Checking Hyprland status...${NC}"
-        check_process "Hyprland" "Hyprland Compositor"
+    if ! update_pip; then
+        log_warn "Pip update encountered issues" "main"
+    fi
+
+    if ! update_npm; then
+        log_warn "Npm update encountered issues" "main"
+    fi
+
+    if ! update_gem; then
+        log_warn "Gem update encountered issues" "main"
+    fi
+
+    if ! update_composer; then
+        log_warn "Composer update encountered issues" "main"
+    fi
+
+    if ! update_shell_configs; then
+        log_warn "Shell configs update encountered issues" "main"
+    fi
+
+    if ! update_vscode_extensions; then
+        log_warn "VS Code extensions update encountered issues" "main"
+    fi
+
+    if ! update_custom_commands; then
+        log_warn "Custom commands encountered issues" "main"
+    fi
+
+    # NEW: Additional Topgrade updates
+    if ! update_homebrew; then
+        log_warn "Homebrew update encountered issues" "main"
+    fi
+
+    if ! update_go; then
+        log_warn "Go update encountered issues" "main"
+    fi
+
+    if ! update_haskell; then
+        log_warn "Haskell update encountered issues" "main"
+    fi
+
+    if ! update_lua; then
+        log_warn "Lua update encountered issues" "main"
+    fi
+
+    if ! update_docker; then
+        log_warn "Docker/Podman update encountered issues" "main"
+    fi
+
+    if ! update_neovim; then
+        log_warn "Neovim update encountered issues" "main"
+    fi
+
+    # NEW: More Topgrade and Guix updates
+    if ! update_nix; then
+        log_warn "Nix/Lix update encountered issues" "main"
+    fi
+
+    if ! update_opam; then
+        log_warn "Opam update encountered issues" "main"
+    fi
+
+    if ! update_vcpkg; then
+        log_warn "Vcpkg update encountered issues" "main"
+    fi
+
+    if ! update_yarn; then
+        log_warn "Yarn update encountered issues" "main"
+    fi
+
+    if ! update_rustup; then
+        log_warn "Rustup update encountered issues" "main"
+    fi
+
+    if ! update_tmux; then
+        log_warn "Tmux update encountered issues" "main"
+    fi
+
+    if ! update_vim; then
+        log_warn "Vim update encountered issues" "main"
+    fi
+
+    if ! update_starship; then
+        log_warn "Starship update encountered issues" "main"
+    fi
+
+    if ! update_guix; then
+        log_warn "Guix update encountered issues" "main"
+    fi
+
+    # Perform system cleanup
+    if ! perform_system_cleanup; then
+        log_warn "System cleanup encountered issues" "main"
+    fi
+
+    # Finalize - CRITICAL FIX: Safe arithmetic operations
+    END_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+    local end_epoch=$(date +%s)
+
+    # Ensure START_EPOCH is set properly
+    START_EPOCH=${START_EPOCH:-0}
+
+    # Safe duration calculation
+    local duration=$((end_epoch - START_EPOCH))
+    [ "$duration" -lt 0 ] && duration=0
+
+    local minutes=$((duration / 60))
+    local seconds=$((duration % 60))
+
+    # Check if any packages were removed during automatic fixes
+    if [ -f /tmp/update-script-removed-pkgs.txt ]; then
+        local removed_pkgs=$(cat /tmp/update-script-removed-pkgs.txt | tr ' ' '\n' | sort -u)
+        local git_conflict_pkgs=""
+        local aur_pkgs=""
         
-        # Check essential Wayland components
-        check_process "waybar" "Waybar Status Bar"
-        check_process "dunst" "Dunst Notifications"
-        check_process "polkit-gnome-au" "Polkit Authentication Agent"
-
-        # Check critical packages for Hyprland
-        echo -e "${BLUE}${ICON_PACKAGE} Checking required packages...${NC}"
-        check_package "xdg-desktop-portal-hyprland"
-        check_package "qt6-wayland"
-        check_package "xdg-utils"
-        check_package "polkit-gnome"
-
-        # Check XDG Desktop Portal status
-        echo -e "\n${BLUE}${ICON_CONFIG} Checking XDG Desktop Portal...${NC}"
-        if systemctl --user status xdg-desktop-portal.service &>/dev/null; then
-            echo -e "${GREEN}${ICON_CHECK} XDG Desktop Portal is running${NC}"
-            # Check portal implementations
-            if systemctl --user status xdg-desktop-portal-hyprland.service &>/dev/null; then
-                echo -e "${GREEN}${ICON_CHECK} Hyprland Portal implementation is active${NC}"
+        # Separate Git conflict packages from AUR packages
+        for pkg in $removed_pkgs; do
+            # Check if this package has a -git version installed (indicating it was a Git conflict)
+            local base_name=$(echo "$pkg" | sed -E 's/-[0-9].*$//')
+            if pacman -Q "${base_name}-git" &>/dev/null 2>&1; then
+                git_conflict_pkgs="$git_conflict_pkgs $pkg"
             else
-                echo -e "${YELLOW}${ICON_WARN} Hyprland Portal implementation not running${NC}"
-                log_message "WARN" "xdg-desktop-portal-hyprland service not active"
-            fi
-        else
-            echo -e "${RED}${ICON_ERROR} XDG Desktop Portal is not running${NC}"
-            log_message "ERROR" "XDG Desktop Portal service not running"
-        fi
-
-        # Check DBus session
-        echo -e "\n${BLUE}${ICON_CONFIG} Checking DBus session...${NC}"
-        if [ -n "$DBUS_SESSION_BUS_ADDRESS" ]; then
-            echo -e "${GREEN}${ICON_CHECK} DBus session is active${NC}"
-            # Test DBus functionality
-            if dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames &>/dev/null; then
-                echo -e "${GREEN}${ICON_CHECK} DBus communication working${NC}"
-            else
-                echo -e "${RED}${ICON_ERROR} DBus communication failed${NC}"
-                log_message "ERROR" "DBus communication test failed"
-            fi
-        else
-            echo -e "${RED}${ICON_ERROR} No DBus session found${NC}"
-            log_message "ERROR" "DBus session not found"
-        fi
-
-        # Monitor memory usage of key components
-        echo -e "\n${BLUE}${ICON_RAM} Checking component memory usage...${NC}"
-        for process in "Hyprland" "waybar" "dunst" "polkit-gnome-au" "xdg-desktop-portal" "pipewire"; do
-            mem_usage=$(ps -C "$process" -O rss --no-headers 2>/dev/null | awk '{sum+=$2} END {print sum/1024}')
-            if [ -n "$mem_usage" ]; then
-                echo -e "${GREEN}${ICON_CHECK} $process: ${mem_usage:.1f} MB${NC}"
-            else
-                echo -e "${YELLOW}${ICON_WARN} $process: Not running${NC}"
-                log_message "WARN" "$process is not running"
+                aur_pkgs="$aur_pkgs $pkg"
             fi
         done
-
-        # Check compositor-related errors in journal
-        echo -e "\n${BLUE}${ICON_CONFIG} Checking compositor logs...${NC}"
-        compositor_errors=$(journalctl -b | grep -i "compositor\\|wayland\\|hyprland" | grep -i "error\\|fail" | tail -n 5)
-        if [ -n "$compositor_errors" ]; then
-            echo -e "${YELLOW}${ICON_WARN} Recent compositor-related errors found:${NC}"
-            echo "$compositor_errors" | sed 's/^/  /'
-            log_message "WARN" "Compositor errors detected in journal"
-        else
-            echo -e "${GREEN}${ICON_CHECK} No recent compositor errors found${NC}"
-        fi
-    fi
-}
-
-# Call the function where needed
-check_hyprland
-
-# Function to check graphics drivers
-check_gpu_status() {
-    echo -e "\n${BLUE}${ICON_GPU} Checking graphics driver status...${NC}"
-    if lspci | grep -i nvidia >/dev/null; then
-        if ! nvidia-smi &>/dev/null; then
-            echo -e "${YELLOW}${ICON_WARN} NVIDIA driver issues detected${NC}"
-            log_message "WARN" "NVIDIA driver not responding properly"
-        else
-            echo -e "${GREEN}${ICON_CHECK} NVIDIA drivers working properly${NC}"
-        fi
-    fi
-}
-
-    # Display resolution and refresh rate
-    echo -e "\n${BLUE}${ICON_DESKTOP} Checking display settings...${NC}"
-    if command -v xrandr >/dev/null && [ -n "$DISPLAY" ]; then
-        xrandr --current | grep -w connected | while read -r line; do
-            echo -e "  ${GREEN}• $line${NC}"
-        done
-    elif command -v hyprctl >/dev/null; then
-        hyprctl monitors | grep -E "Monitor|resolution" | while read -r line; do
-            echo -e "  ${GREEN}• $line${NC}"
-        done
-    fi
-
-    # Bootloader Configuration
-    echo -e "\n${BLUE}${ICON_CONFIG} Checking bootloader configuration...${NC}"
-    if [ -d "/boot/grub" ]; then
-        echo -e "  ${GREEN}• GRUB detected${NC}"
-        if [ -f "/boot/grub/grub.cfg" ]; then
-            echo -e "  ${GREEN}• GRUB config present${NC}"
-            grub_time=$(stat -c %Y /boot/grub/grub.cfg)
-            echo -e "  ${BLUE}• Last updated: $(date -d "@$grub_time")${NC}"
-        fi
-    elif [ -d "/boot/loader" ]; then
-        echo -e "  ${GREEN}• systemd-boot detected${NC}"
-        bootctl status 2>/dev/null || echo -e "  ${YELLOW}• Unable to get bootloader status${NC}"
-    fi
-
-    # Virtualization Status
-    echo -e "\n${BLUE}${ICON_SYSTEM} Checking virtualization support...${NC}"
-    if grep -q "^flags.*vmx\|^flags.*svm" /proc/cpuinfo; then
-        echo -e "  ${GREEN}• CPU virtualization support: Yes${NC}"
-        for module in kvm kvm_intel kvm_amd vboxdrv; do
-            if lsmod | grep -q "^$module"; then
-                echo -e "  ${GREEN}• $module module: Loaded${NC}"
-            fi
-        done
-    else
-        echo -e "  ${YELLOW}• CPU virtualization support: No${NC}"
-    fi
-
-    # Microcode Updates
-    echo -e "\n${BLUE}${ICON_CPU} Checking microcode status...${NC}"
-    if [ -f "/sys/devices/system/cpu/microcode/reload" ]; then
-        if dmesg | grep -i "microcode updated early to" >/dev/null; then
-            echo -e "  ${GREEN}• Microcode is up to date${NC}"
-        else
-            echo -e "  ${YELLOW}• Microcode update may be needed${NC}"
-        fi
-    fi
-
-    # System Time Sync
-    echo -e "\n${BLUE}${ICON_CONFIG} Checking time synchronization...${NC}"
-    for timesync in systemd-timesyncd chronyd ntpd; do
-        if systemctl is-active $timesync >/dev/null 2>&1; then
-            echo -e "  ${GREEN}• $timesync is active and running${NC}"
-            if [ "$timesync" = "systemd-timesyncd" ]; then
-                timedatectl status | grep "System clock" | sed 's/^/  /'
-            fi
-        fi
-    done
-
-    # Font Configuration
-    echo -e "\n${BLUE}${ICON_CONFIG} Checking font configuration...${NC}"
-    if [ -f "$HOME/.config/fontconfig/fonts.conf" ]; then
-        echo -e "  ${GREEN}• User font configuration exists${NC}"
-    fi
-    if command -v fc-cache >/dev/null; then
-        echo -e "  ${GREEN}• Font cache is available${NC}"
-    fi
-
-    # Package Dependencies
-    echo -e "\n${BLUE}${ICON_PACKAGE} Checking package dependencies...${NC}"
-    if pacman -Qdt >/dev/null 2>&1; then
-        echo -e "  ${GREEN}• No orphaned packages found${NC}"
-    else
-        echo -e "  ${YELLOW}• Orphaned packages detected${NC}"
-        pacman -Qdt | sed 's/^/    /'
-    fi
-
-    # Swap/ZRAM Configuration
-    echo -e "\n${BLUE}${ICON_RAM} Checking swap/ZRAM configuration...${NC}"
-    if grep -q "zram" /proc/swaps; then
-        echo -e "  ${GREEN}• ZRAM is active${NC}"
-        echo -e "  ${BLUE}• ZRAM usage:${NC}"
-        swapon --show | grep zram | sed 's/^/    /'
-    fi
-    if [ -n "$(swapon --show)" ]; then
-        echo -e "  ${BLUE}• Swap status:${NC}"
-        free -h | grep "Swap:" | sed 's/^/    /'
-    fi
-
-    # Backup Status
-    echo -e "\n${BLUE}${ICON_BACKUP} Checking backup system status...${NC}"
-    for backup in timeshift snapper; do
-        if command -v $backup >/dev/null; then
-            echo -e "  ${GREEN}• $backup is installed${NC}"
-            case $backup in
-                timeshift)
-                    if timeshift --list >/dev/null 2>&1; then
-                        echo -e "  ${BLUE}• Recent backups:${NC}"
-                        timeshift --list | tail -n 3 | sed 's/^/    /'
-                    fi
-                    ;;
-                snapper)
-                    if snapper list >/dev/null 2>&1; then
-                        echo -e "  ${BLUE}• Recent snapshots:${NC}"
-                        snapper list | tail -n 3 | sed 's/^/    /'
-                    fi
-                    ;;
-            esac
-        fi
-    done
-
-    # Firmware Updates
-    echo -e "\n${BLUE}${ICON_UPDATE} Checking firmware updates...${NC}"
-    if command -v fwupdmgr >/dev/null; then
-        echo -e "  ${GREEN}• fwupd is installed${NC}"
-        if fwupdmgr get-devices >/dev/null 2>&1; then
-            echo -e "  ${BLUE}• Firmware status:${NC}"
-            fwupdmgr get-updates 2>/dev/null || echo -e "    No updates available"
-        fi
-    fi
-
-    # System File Integrity
-    echo -e "\n${BLUE}${ICON_CONFIG} Checking system file integrity...${NC}"
-    for integrity in aide tripwire; do
-        if command -v $integrity >/dev/null; then
-            echo -e "  ${GREEN}• $integrity is installed${NC}"
-            case $integrity in
-                aide)
-                    if [ -f "/var/lib/aide/aide.db.gz" ]; then
-                        echo -e "  ${BLUE}• AIDE database exists${NC}"
-                    fi
-                    ;;
-                tripwire)
-                    if [ -f "/var/lib/tripwire/$(hostname).twd" ]; then
-                        echo -e "  ${BLUE}• Tripwire database exists${NC}"
-                    fi
-                    ;;
-            esac
-        fi
-    done
-
-    # Update complete
-# Update complete
-# Check Wayland status
-check_wayland_status() {
-    if [ "$WAYLAND" = "1" ]; then
-        echo -e "${BLUE}${ICON_DESKTOP} Verifying Wayland components...${NC}"
-        if [ "$HYPRLAND" = "1" ]; then
-            if pgrep -x "Hyprland" >/dev/null; then
-                echo -e "${GREEN}${ICON_CHECK} Hyprland is running properly${NC}"
-            else
-                echo -e "${YELLOW}${ICON_WARN} Hyprland service state inconsistent${NC}"
-            fi
-            
-            # Check Hyprland-specific components 
-            for comp in "waybar" "wlogout" "hyprctl"; do
-                if command -v $comp >/dev/null; then
-                    echo -e "${GREEN}${ICON_CHECK} $comp is available${NC}"
-                else  
-                    echo -e "${YELLOW}${ICON_WARN} $comp not found${NC}"
-                    log_message "WARN" "$comp not found"
-                fi
+        
+        # Display Git conflict packages
+        if [ -n "$git_conflict_pkgs" ]; then
+            echo -e "\n${YELLOW}${ICON_WARN} ${BOLD}Important: Regular Packages Removed (Git Conflicts)${NC}"
+            echo -e "${YELLOW}The following regular packages were removed because they conflict with installed -git versions:${NC}"
+            for pkg in $git_conflict_pkgs; do
+                local base_name=$(echo "$pkg" | sed -E 's/-[0-9].*$//')
+                local git_version=$(pacman -Q "${base_name}-git" 2>/dev/null | awk '{print $2}')
+                echo -e "  • ${CYAN}$pkg${NC} (kept ${GREEN}${base_name}-git-${git_version}${NC})"
             done
+            echo ""
+            echo -e "${GREEN}Note:${NC} -git versions are kept as they're typically more up-to-date."
+            echo -e "${DIM}If you need the regular versions, you can install them after removing the -git versions:${NC}"
+            for pkg in $git_conflict_pkgs; do
+                local base_name=$(echo "$pkg" | sed -E 's/-[0-9].*$//')
+                echo -e "  ${CYAN}sudo pacman -R ${base_name}-git && sudo pacman -S ${base_name}${NC}"
+            done
+            echo ""
         fi
+        
+        # Display AUR packages
+        if [ -n "$aur_pkgs" ]; then
+            echo -e "\n${YELLOW}${ICON_WARN} ${BOLD}Important: AUR Packages Removed${NC}"
+            echo -e "${YELLOW}The following AUR packages were temporarily removed to resolve dependency conflicts:${NC}"
+            for pkg in $aur_pkgs; do
+                echo -e "  • ${CYAN}$pkg${NC}"
+            done
+            echo ""
+            echo -e "${GREEN}You can reinstall them now with:${NC}"
+            for pkg in $aur_pkgs; do
+                echo -e "  ${CYAN}yay -S $pkg${NC}  # or paru -S $pkg"
+            done
+            echo ""
+        fi
+
+        # Clean up temp file
+        rm -f /tmp/update-script-removed-pkgs.txt
+    fi
+
+    # Print summary
+    echo -e "\n${BLUE}${BOLD}Update Summary:${NC}"
+    echo -e "  ${ICON_COMPLETE} Total packages updated: $TOTAL_PACKAGES_UPDATED"
+    echo -e "  ${ICON_ERROR} Failed operations: $FAILED_OPERATIONS"
+    echo -e "  ${ICON_CHECK} Start time: $START_TIME"
+    echo -e "  ${ICON_CHECK} End time: $END_TIME"
+    echo -e "  ${ICON_CHECK} Duration: ${minutes}m ${seconds}s"
+    echo -e "  📁 Logs: $LOG_FILE"
+    echo -e "  💾 Backups: $BACKUP_DIR"
+
+    if [ "$FAILED_OPERATIONS" -gt 0 ]; then
+        echo -e "\n${RED}${BOLD}⚠️  Some operations failed. Check logs for details.${NC}"
+        exit 1
+    else
+        echo -e "\n${GREEN}${BOLD}${ICON_COMPLETE} Update process completed successfully!${NC}"
+        exit 0
     fi
 }
 
-# Run checks
-check_wayland_status
-
-# Update complete
-echo -e "\n${GREEN}╔════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║         System Update Complete! ${ICON_COMPLETE}          ║${NC}"
-echo -e "${GREEN}╚════════════════════════════════════════════╝${NC}"
-
-# Detailed Summary
-echo -e "\n${CYAN}${ICON_SYSTEM} Update Summary:${NC}"
-echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}• Update Time:${NC} $(date '+%Y-%m-%d %H:%M:%S')"
-echo -e "${BLUE}• System Status:${NC} $(systemctl is-system-running)"
-echo -e "${BLUE}• Desktop Environment:${NC} $([[ "$KDE" = "1" ]] && echo "KDE Plasma" || echo "Other")"
-echo -e "${BLUE}• Display Server:${NC} $([[ "$WAYLAND" = "1" ]] && echo "Wayland" || echo "X11")"
-echo -e "${BLUE}• Compositor:${NC} $([[ "$HYPRLAND" = "1" ]] && echo "Hyprland" || echo "Other")"
-echo -e "${BLUE}• Kernel Version:${NC} $(uname -r)"
-echo -e "${BLUE}• Log Files:${NC}"
-echo -e "  - Main Log: $LOG_FILE"
-echo -e "  - Error Log: $ERROR_LOG"
-echo -e "  - Backup Log: $BACKUP_LOG"
-
-# Reboot recommendation if kernel was updated
-# Smart reboot detection
-echo -e "\n${CYAN}${ICON_SYSTEM} Checking for pending updates...${NC}"
-reboot_needed=0
-
-# Check kernel updates
-if [ -f "/usr/lib/modules/$(uname -r)/vmlinuz" ]; then
-    if ! pacman -Q linux | grep -q "$(uname -r)"; then
-        echo -e "${YELLOW}${ICON_KERNEL} Kernel update detected${NC}"
-        reboot_needed=1
-        log_message "Kernel update detected"
-    fi
+# Run main function with error handling
+if [ $# -eq 0 ] || [ "${1:-}" != "--help" ] && [ "${1:-}" != "--version" ]; then
+    main "$@"
 fi
-
-# Check for Wayland/Hyprland updates
-if [ "$WAYLAND" = "1" ]; then
-    if [ "$HYPRLAND" = "1" ] && pacman -Qqu | grep -q "^hyprland"; then
-        echo -e "${YELLOW}${ICON_DESKTOP} Hyprland update detected${NC}"
-        reboot_needed=1
-        log_message "Hyprland update detected"
-    fi
-fi
-
-# Check for graphics driver updates
-if pacman -Qqu | grep -qE "^nvidia|^mesa"; then
-    echo -e "${YELLOW}${ICON_GPU} Graphics driver update detected${NC}"
-    reboot_needed=1
-    log_message "Graphics driver update detected"
-fi
-
-# Display reboot recommendation
-if [ $reboot_needed -eq 1 ]; then
-    echo -e "\n${YELLOW}${ICON_WARN} System reboot is recommended to apply the following updates:${NC}"
-    [ -n "$(pacman -Qqu | grep "^linux")" ] && echo -e "  ${ICON_KERNEL} Kernel updates"
-    [ -n "$(pacman -Qqu | grep "^hyprland")" ] && echo -e "  ${ICON_DESKTOP} Hyprland updates"
-    [ -n "$(pacman -Qqu | grep -E "^nvidia|^mesa")" ] && echo -e "  ${ICON_GPU} Graphics driver updates"
-else
-    echo -e "\n${GREEN}${ICON_CHECK} No reboot required${NC}"
-fi
-
-log_message "Update process completed successfully"

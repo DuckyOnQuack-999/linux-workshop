@@ -173,7 +173,7 @@ EEOF
 log_info "Installing packages..."
 
 # Check hyprpm dependencies
-hyprpm_deps=("cmake" "meson" "cpio" "pkg-config" "git" "gcc" "tomlplusplus")
+hyprpm_deps=("cmake" "meson" "cpio" "pkg-config" "git" "gcc" "g++")
 missing_hyprpm_deps=()
 for dep in "${hyprpm_deps[@]}"; do
     if ! check_package "$dep"; then
@@ -182,7 +182,7 @@ for dep in "${hyprpm_deps[@]}"; do
 done
 if [[ ${#missing_hyprpm_deps[@]} -gt 0 ]]; then
     log_info "Installing missing hyprpm dependencies: ${missing_hyprpm_deps[*]}"
-    yay -S --needed --noconfirm "${missing_hyprpm_deps[@]}" || {
+    yay -S --needed "${missing_hyprpm_deps[@]}" || {
         log_error "Failed to install hyprpm dependencies"
         exit 1
     }
@@ -1549,7 +1549,7 @@ echo "Checking required packages..."
 required_packages=(
     "hyprland" "hypridle" "hyprlock" "mako" "swww" "wl-clipboard"
     "cliphist" "fuzzel" "foot" "jq" "wf-recorder" "slurp" "libnotify" "fcitx5"
-    "cmake" "meson" "cpio" "pkg-config" "git" "gcc" "tomlplusplus"
+    "cmake" "meson" "cpio" "pkg-config" "git" "gcc" "g++"
 )
 for package in "${required_packages[@]}"; do
     if pacman -Qi "$package" &> /dev/null; then
@@ -1953,7 +1953,7 @@ chmod +x hyprland-advanced-extras-enhanced.sh
 
 ## Prerequisites
 - **Core Dependencies**: `yay`, `pip`, `pipx`, `yad`
-- **hyprpm Dependencies**: `cmake`, `meson`, `cpio`, `pkg-config`, `git`, `gcc`, `tomlplusplus`
+- **hyprpm Dependencies**: `cmake`, `meson`, `cpio`, `pkg-config`, `git`, `gcc`, `g++`
 - **Essential Packages**: `hyprland`, `hypridle`, `hyprlock`, `mako`, `swww`, `wl-clipboard`, `cliphist`, `fuzzel`, `foot`, `jq`, `wf-recorder`, `slurp`, `libnotify`, `fcitx5`
 - **Recommended**: GPU drivers (`mesa`, `nvidia`, or `amdvlk`)
 
@@ -2007,7 +2007,7 @@ If issues occur:
 4. Test configuration: `hyprctl reload`
 5. Check system status: `~/.config/hypr/scripts/system-status.sh`
 6. Ensure GPU drivers are installed (`mesa`, `nvidia`, or `amdvlk`).
-7. Verify `hyprpm` dependencies: `cmake`, `meson`, `cpio`, `pkg-config`, `git`, `gcc`, `tomlplusplus`.
+7. Verify `hyprpm` dependencies: `cmake`, `meson`, `cpio`, `pkg-config`, `git`, `gcc`, `g++`.
 8. If package installation fails, check your internet connection and try running `yay -Sy` first.
 9. For terminal issues, ensure you have a compatible terminal emulator installed (foot, kitty, alacritty, etc.).
 
