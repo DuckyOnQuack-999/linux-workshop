@@ -807,10 +807,17 @@ attempt_git_package_conflict_fix() {
     echo -e "\n${CYAN}${ICON_CONFIG} Attempting to fix Git package conflicts...${NC}"
     log_info "Running Git package conflict resolution" "pacman"
 
+    local DEBUG_LOG="/home/duckyonquack999/GitHub-Repositories/.cursor/debug.log"
+
     # Extract conflicting regular packages from error log
     # Pattern: "removing 'package-version' from target list because it conflicts with 'package-git-version'"
-    local conflicting_pkgs=$(grep -i "removing '.*' from target list because it conflicts with '.*-git" /tmp/pacman_stderr.log | \
+    local conflicting_pkgs=$(grep -i "removing '.*' from target list because it conflicts with '.*-git" /tmp/pacman_stderr.log |
         sed -n "s/.*removing '\([^']*\)' from target list.*/\1/p" | sort -u)
+
+    #region agent log
+    printf '{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"update-all.sh:815","message":"conflicting_pkgs_extracted","data":{"count":%d,"packages":"%s"},"timestamp":%s}\n' \
+        $(echo "$conflicting_pkgs" | grep -c . 2>/dev/null || echo 0) "$(echo "$conflicting_pkgs" | tr '\n' ' ')" "$(date +%s%3N)" >>"$DEBUG_LOG" 2>/dev/null
+    #endregion
 
     if [ -z "$conflicting_pkgs" ]; then
         echo -e "${YELLOW}Could not identify conflicting packages${NC}"
@@ -830,23 +837,37 @@ attempt_git_package_conflict_fix() {
     # Check which -git versions are actually installed
     local git_pkgs_installed=""
     local regular_pkgs_to_remove=""
-    
+
     for base_pkg in $base_pkgs; do
         base_pkg=$(echo "$base_pkg" | xargs) # trim whitespace
         if [ -z "$base_pkg" ]; then
             continue
         fi
-        
+
         # Check if -git version is installed
         if pacman -Q "${base_pkg}-git" &>/dev/null; then
+            #region agent log
+            printf '{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"update-all.sh:844","message":"git_package_detected","data":{"base":"%s"},"timestamp":%s}\n' \
+                "$base_pkg" "$(date +%s%3N)" >>"$DEBUG_LOG" 2>/dev/null
+            #endregion
             git_pkgs_installed="$git_pkgs_installed ${base_pkg}-git"
             # Find the exact regular package name that conflicts
             local regular_pkg=$(echo "$conflicting_pkgs" | grep "^${base_pkg}-" | head -1)
             if [ -n "$regular_pkg" ]; then
                 regular_pkgs_to_remove="$regular_pkgs_to_remove $regular_pkg"
             fi
+        else
+            #region agent log
+            printf '{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H1","location":"update-all.sh:851","message":"git_package_missing","data":{"base":"%s"},"timestamp":%s}\n' \
+                "$base_pkg" "$(date +%s%3N)" >>"$DEBUG_LOG" 2>/dev/null
+            #endregion
         fi
     done
+
+    #region agent log
+    printf '{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"update-all.sh:854","message":"regular_pkgs_to_remove","data":{"packages":"%s"},"timestamp":%s}\n' \
+        "$(echo "$regular_pkgs_to_remove" | tr '\n' ' ')" "$(date +%s%3N)" >>"$DEBUG_LOG" 2>/dev/null
+    #endregion
 
     if [ -z "$regular_pkgs_to_remove" ]; then
         echo -e "${YELLOW}No conflicting regular packages found to remove${NC}"
@@ -871,11 +892,26 @@ attempt_git_package_conflict_fix() {
         if [ -n "$pkg" ]; then
             # Extract base name for removal
             local base_name=$(echo "$pkg" | sed -E 's/-[0-9].*$//')
+            if pacman -Q "$base_name" &>/dev/null; then
+                #region agent log
+                printf '{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"update-all.sh:892","message":"regular_pkg_installed","data":{"base":"%s"},"timestamp":%s}\n' \
+                    "$base_name" "$(date +%s%3N)" >>"$DEBUG_LOG" 2>/dev/null
+                #endregion
+            else
+                #region agent log
+                printf '{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H2","location":"update-all.sh:896","message":"regular_pkg_not_installed","data":{"base":"%s"},"timestamp":%s}\n' \
+                    "$base_name" "$(date +%s%3N)" >>"$DEBUG_LOG" 2>/dev/null
+                #endregion
+            fi
             echo -e "  Removing ${CYAN}$base_name${NC}..."
             if sudo pacman -R "$base_name" --noconfirm 2>/dev/null; then
                 log_info "Removed conflicting regular package: $base_name" "pacman"
                 removed_pkgs="$removed_pkgs $base_name"
             else
+                #region agent log
+                printf '{"sessionId":"debug-session","runId":"pre-fix","hypothesisId":"H3","location":"update-all.sh:877","message":"removal_failed","data":{"base":"%s"},"timestamp":%s}\n' \
+                    "$base_name" "$(date +%s%3N)" >>"$DEBUG_LOG" 2>/dev/null
+                #endregion
                 log_warn "Failed to remove $base_name" "pacman"
                 failed=true
             fi
@@ -1236,7 +1272,7 @@ pacman_update_with_recovery() {
             echo ""
 
             # Extract and display conflicting packages
-            local conflicting_pkgs=$(grep -i "removing '.*' from target list because it conflicts with '.*-git" /tmp/pacman_stderr.log | \
+            local conflicting_pkgs=$(grep -i "removing '.*' from target list because it conflicts with '.*-git" /tmp/pacman_stderr.log |
                 sed -n "s/.*removing '\([^']*\)' from target list because it conflicts with '\([^']*\)'.*/\1 conflicts with \2/p" | sort -u)
 
             if [ -n "$conflicting_pkgs" ]; then
@@ -2623,7 +2659,7 @@ EOF
         local removed_pkgs=$(cat /tmp/update-script-removed-pkgs.txt | tr ' ' '\n' | sort -u)
         local git_conflict_pkgs=""
         local aur_pkgs=""
-        
+
         # Separate Git conflict packages from AUR packages
         for pkg in $removed_pkgs; do
             # Check if this package has a -git version installed (indicating it was a Git conflict)
@@ -2634,7 +2670,7 @@ EOF
                 aur_pkgs="$aur_pkgs $pkg"
             fi
         done
-        
+
         # Display Git conflict packages
         if [ -n "$git_conflict_pkgs" ]; then
             echo -e "\n${YELLOW}${ICON_WARN} ${BOLD}Important: Regular Packages Removed (Git Conflicts)${NC}"
@@ -2653,7 +2689,7 @@ EOF
             done
             echo ""
         fi
-        
+
         # Display AUR packages
         if [ -n "$aur_pkgs" ]; then
             echo -e "\n${YELLOW}${ICON_WARN} ${BOLD}Important: AUR Packages Removed${NC}"
